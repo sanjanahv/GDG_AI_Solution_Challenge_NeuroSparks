@@ -2,7 +2,7 @@
 # FastAPI entry point for BiasScope backend
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import decision, feedback, bias
+from routers import decision, feedback, bias, session
 
 app = FastAPI(
     title="BiasScope API",
@@ -22,6 +22,7 @@ app.add_middleware(
 app.include_router(decision.router, prefix="/api", tags=["Decision"])
 app.include_router(feedback.router, prefix="/api", tags=["Feedback"])
 app.include_router(bias.router, prefix="/api", tags=["Bias Analysis"])
+app.include_router(session.router, prefix="/api", tags=["Sessions & Advanced"])
 
 
 @app.get("/")

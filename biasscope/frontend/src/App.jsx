@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Briefcase, GraduationCap, Building2, Microscope, 
-  Key, RefreshCw, ThumbsUp, ThumbsDown, Activity, Shield, AlertTriangle, CheckCircle, XCircle, Zap
+  Key, RefreshCw, ThumbsUp, ThumbsDown, Activity, Shield, AlertTriangle, CheckCircle, XCircle, Zap, Flag
 } from 'lucide-react';
 import { generateProfile, makeDecision, setApiKey as setLlmApiKey } from './services/llm';
 import { getMemory, addFeedback, getStats, incrementDecisions } from './services/rl';
+import { classifyWithDetails } from './services/attributeClassifier';
 import { analyzeBias, applyCorrection, getRecommendation, storeDecision, rewardAttribute, penalizeAttribute, healthCheck } from './services/api';
 
 function App() {
@@ -26,6 +27,8 @@ function App() {
   const [backendAlive, setBackendAlive] = useState(false);
   const [selectedProtected, setSelectedProtected] = useState('Gender');
   const [selectedAlgorithm, setSelectedAlgorithm] = useState('calibrated_eq_odds');
+  const [classifications, setClassifications] = useState({});
+  const [fairnessScore, setFairnessScore] = useState(null);
 
   useEffect(() => {
     if (apiKey) {
@@ -52,17 +55,31 @@ function App() {
       incrementDecisions();
       setStats(getStats());
       
+      // Phase 4: Classify attributes client-side
+      const cls = classifyWithDetails(activeDomain, newProfile.attributes || {});
+      setClassifications(cls);
+      
       const historyEntry = { domain: activeDomain, decision: newDecision, profile: newProfile, timestamp: Date.now() };
       setSessionHistory(prev => [historyEntry, ...prev]);
       
-      // Store in backend for AIF360
+      // Store in backend for AIF360 + get fairness score
       if (backendAlive) {
-        storeDecision({
-          domain: activeDomain.toLowerCase(),
-          attributes: newProfile.attributes || {},
-          decision: newDecision.decision,
-          weighted_attributes: newDecision.weightedAttributes || [],
-        });
+        try {
+          const res = await fetch('http://localhost:8000/api/decide', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              domain: activeDomain.toLowerCase(),
+              profile: newProfile.attributes || {},
+              decision: newDecision.decision,
+              weighted_attributes: (newDecision.weightedAttributes || []).map(wa => ({
+                attribute: wa.attribute, weight: wa.weight, reasoning: wa.reasoning || ''
+              }))
+            })
+          });
+          const data = await res.json();
+          setFairnessScore(data.fairness_score || null);
+        } catch (e) { console.warn('Backend scoring failed:', e); }
       }
     } catch (err) {
       console.error(err);
@@ -212,12 +229,22 @@ function App() {
               <div className="profile-card">
                 <h3>{profile.name} - Profile</h3>
                 <div className="profile-grid">
-                  {Object.entries(profile.attributes || {}).map(([key, val]) => (
-                    <React.Fragment key={key}>
-                      <div className="profile-label">{key}</div>
-                      <div style={{ color: 'var(--text-main)' }}>{val.toString()}</div>
-                    </React.Fragment>
-                  ))}
+                  {Object.entries(profile.attributes || {}).map(([key, val]) => {
+                    const cls = classifications[key];
+                    const badgeClass = cls?.class?.toLowerCase() || '';
+                    return (
+                      <React.Fragment key={key}>
+                        <div className="profile-label">
+                          {key}
+                          {badgeClass && <span className={`attr-badge ${badgeClass}`}>{cls.class}</span>}
+                        </div>
+                        <div>
+                          <span style={{ color: 'var(--text-main)' }}>{val.toString()}</span>
+                          {cls?.explanation && <span className="proxy-hint">{cls.explanation}</span>}
+                        </div>
+                      </React.Fragment>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -236,6 +263,7 @@ function App() {
                           <div className="feedback-actions" style={{ marginTop: 0 }}>
                             <button className="btn-feedback pos" style={{ padding: '0.5rem', fontSize: '0.8rem' }} onClick={() => handleFeedback(attr.attribute, 'positive')}><ThumbsUp size={14} /> Reward</button>
                             <button className="btn-feedback neg" style={{ padding: '0.5rem', fontSize: '0.8rem' }} onClick={() => handleFeedback(attr.attribute, 'negative')}><ThumbsDown size={14} /> Penalize</button>
+                            <button className="btn-feedback flag" style={{ padding: '0.5rem', fontSize: '0.8rem' }} onClick={() => handleFeedback(attr.attribute, 'ambiguous')}><Flag size={14} /> Flag Proxy</button>
                           </div>
                         ) : (
                           <div style={{ color: 'var(--stat-pos)', fontSize: '0.85rem', fontWeight: 500 }}>
@@ -245,6 +273,39 @@ function App() {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {/* Phase 4: Fairness Score Breakdown */}
+              {fairnessScore && (
+                <div className="profile-card animate-fade-in" style={{ borderColor: 'var(--accent-blue)' }}>
+                  <h3 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
+                    <Shield size={18} color="var(--accent-blue)" /> Fairness Score
+                  </h3>
+                  <div className="fairness-grade">
+                    <div className={`grade-circle ${fairnessScore.letter_grade}`}>{fairnessScore.letter_grade}</div>
+                    <div>
+                      <div style={{ fontSize: '2rem', fontWeight: 800, fontFamily: 'var(--font-heading)' }}>{(fairnessScore.total_score * 100).toFixed(0)}%</div>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Fairness Score</div>
+                    </div>
+                  </div>
+                  <table className="breakdown-table">
+                    <thead><tr><th></th><th>Term</th><th>Value</th><th>Bar</th></tr></thead>
+                    <tbody>
+                      {fairnessScore.breakdown?.map((t, i) => (
+                        <tr key={i}>
+                          <td className={`term-sign ${t.sign === '+' ? 'positive' : 'negative'}`}>{t.sign === '+' ? '+' : '−'}</td>
+                          <td style={{ color: 'var(--text-main)' }}>{t.term.replace(/_/g, ' ')}</td>
+                          <td style={{ fontFamily: 'var(--font-heading)', fontWeight: 700 }}>{t.value.toFixed(2)}</td>
+                          <td>
+                            <div className="term-bar">
+                              <div className="term-bar-fill" style={{ width: `${(t.value / t.cap) * 100}%`, background: t.sign === '+' ? 'var(--stat-pos)' : 'var(--stat-neg)' }}></div>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </div>
@@ -380,10 +441,16 @@ function App() {
                           <span key={attr} className="attribute-tag pos">{attr}</span>
                         )) : <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>None yet</span>}
                       </div>
-                      <div>
+                      <div style={{ marginBottom: '1rem' }}>
                         <div className="profile-label" style={{ color: 'var(--stat-neg)', marginBottom: '0.5rem' }}>Penalized:</div>
                         {mem.negative.length > 0 ? mem.negative.map(attr => (
                           <span key={attr} className="attribute-tag neg">{attr}</span>
+                        )) : <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>None yet</span>}
+                      </div>
+                      <div>
+                        <div className="profile-label" style={{ color: 'var(--stat-caution)', marginBottom: '0.5rem' }}>Ambiguous (Proxy):</div>
+                        {(mem.ambiguous || []).length > 0 ? mem.ambiguous.map(attr => (
+                          <span key={attr} className="attribute-tag caution">{attr}</span>
                         )) : <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>None yet</span>}
                       </div>
                     </div>

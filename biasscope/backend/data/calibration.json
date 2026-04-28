@@ -1,0 +1,59 @@
+{
+  "real_world_stats": {
+    "eeoc_gender_discrimination": {
+      "value": 0.271,
+      "description": "27.1% of EEOC charges are gender-based discrimination",
+      "source": "EEOC FY2023 Annual Report"
+    },
+    "hmda_black_denial_rate": {
+      "value": 2.5,
+      "description": "Black applicant mortgage denial rate is 2.5x that of white applicants",
+      "source": "HMDA 2022 Data"
+    },
+    "nacac_legacy_advantage": {
+      "value": 3.0,
+      "description": "Legacy admit rate is 3x non-legacy at selective institutions",
+      "source": "NACAC 2023 State of Admissions"
+    },
+    "hiring_name_callback_gap": {
+      "value": 1.5,
+      "description": "White-sounding names receive 50% more callbacks than Black-sounding names",
+      "source": "Bertrand & Mullainathan (2004), replicated 2021"
+    },
+    "gender_pay_gap": {
+      "value": 0.84,
+      "description": "Women earn 84 cents for every dollar earned by men",
+      "source": "BLS 2023 Annual Report"
+    },
+    "age_discrimination_charges": {
+      "value": 0.211,
+      "description": "21.1% of EEOC charges involve age discrimination",
+      "source": "EEOC FY2023 Annual Report"
+    }
+  },
+  "fairness_thresholds": {
+    "disparate_impact_80_rule": {
+      "lower": 0.8,
+      "upper": 1.25,
+      "description": "US 80% Rule: DI between 0.8-1.25 is considered fair"
+    },
+    "statistical_parity_threshold": {
+      "threshold": 0.1,
+      "description": "Statistical parity difference should be within ±0.1"
+    }
+  },
+  "domain_context": {
+    "job": {
+      "narrative": "In hiring, AI systems have been shown to perpetuate gender and racial biases from historical training data. Amazon's resume-screening AI (2018) systematically downgraded women's applications.",
+      "key_legislation": "Title VII, Civil Rights Act (1964)"
+    },
+    "loan": {
+      "narrative": "Lending algorithms have been found to charge higher interest rates to minority borrowers, even after controlling for creditworthiness. The Fair Lending Act requires equal access.",
+      "key_legislation": "Equal Credit Opportunity Act (1974), Fair Housing Act"
+    },
+    "college": {
+      "narrative": "College admissions algorithms can perpetuate socioeconomic inequality through proxies like zip code, legacy status, and extracurricular access.",
+      "key_legislation": "Students for Fair Admissions v. Harvard (2023)"
+    }
+  }
+}

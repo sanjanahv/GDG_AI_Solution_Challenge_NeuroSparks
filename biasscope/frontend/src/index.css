@@ -574,3 +574,113 @@ h1, h2, h3, h4, h5, h6 {
   border-radius: 4px;
   transition: width 0.6s ease, background 0.3s ease;
 }
+
+/* ============ Phase 4: Classification Badges ============ */
+.attr-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+.attr-badge.normal { background: rgba(6,214,160,0.15); color: var(--stat-pos); border: 1px solid rgba(6,214,160,0.3); }
+.attr-badge.ambiguous { background: rgba(255,190,11,0.15); color: var(--stat-caution); border: 1px solid rgba(255,190,11,0.3); }
+.attr-badge.redundant { background: rgba(255,84,0,0.15); color: var(--stat-neg); border: 1px solid rgba(255,84,0,0.3); }
+.attr-badge.protected { background: rgba(255,0,110,0.15); color: var(--accent-pink); border: 1px solid rgba(255,0,110,0.3); }
+
+.proxy-hint {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--stat-caution);
+  font-style: italic;
+  margin-top: 0.25rem;
+  padding-left: 0.5rem;
+  border-left: 2px solid var(--stat-caution);
+}
+
+/* Flag Proxy Button */
+.btn-feedback.flag {
+  border-color: var(--stat-caution);
+  color: var(--stat-caution);
+}
+.btn-feedback.flag:hover {
+  background: rgba(255,190,11,0.2);
+  border-color: var(--stat-caution);
+}
+
+/* ============ Fairness Score Breakdown ============ */
+.fairness-grade {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+.grade-circle {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-heading);
+  font-size: 2rem;
+  font-weight: 800;
+  border: 3px solid;
+}
+.grade-circle.A { border-color: var(--stat-pos); color: var(--stat-pos); background: rgba(6,214,160,0.1); }
+.grade-circle.B { border-color: var(--accent-blue); color: var(--accent-blue); background: rgba(58,134,255,0.1); }
+.grade-circle.C { border-color: var(--stat-caution); color: var(--stat-caution); background: rgba(255,190,11,0.1); }
+.grade-circle.D { border-color: var(--stat-neg); color: var(--stat-neg); background: rgba(255,84,0,0.1); }
+.grade-circle.F { border-color: var(--accent-pink); color: var(--accent-pink); background: rgba(255,0,110,0.1); }
+
+.breakdown-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.breakdown-table th {
+  text-align: left;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--panel-border);
+}
+.breakdown-table td {
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+.breakdown-table tr:hover {
+  background: rgba(255,255,255,0.02);
+}
+.term-sign {
+  font-weight: 800;
+  font-size: 1rem;
+  width: 20px;
+  text-align: center;
+}
+.term-sign.positive { color: var(--stat-pos); }
+.term-sign.negative { color: var(--stat-neg); }
+.term-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.05);
+  overflow: hidden;
+  min-width: 60px;
+}
+.term-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.attribute-tag.caution {
+  border-color: var(--stat-caution);
+  color: var(--stat-caution);
+}
