@@ -1,0 +1,5 @@
+{
+  "job": { "rewarded": [], "penalized": [], "ambiguous": [] },
+  "loan": { "rewarded": [], "penalized": [], "ambiguous": [] },
+  "college": { "rewarded": [], "penalized": [], "ambiguous": [] }
+}
