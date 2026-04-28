@@ -134,6 +134,66 @@ Only return valid JSON without markdown wrapping. Format:
   }
 };
 
+// ─── Batch Profile Generation ────────────────────────────────────
+// Generates 40-50 profiles in one go from the backend seeded generator.
+// Uses Promise.allSettled for resilience — partial failures don't kill the batch.
+
+export const generateBatchProfiles = async (domain, count = 45) => {
+  const baseSeed = Math.floor(Math.random() * 100000);
+  const promises = [];
+
+  for (let i = 0; i < count; i++) {
+    const seed = baseSeed + i;
+    promises.push(
+      fetch(`http://localhost:8000/api/generate-profile?domain=${domain.toLowerCase()}&seed=${seed}`)
+        .then(res => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .catch(err => {
+          console.warn(`[Batch] Profile ${i} failed:`, err.message);
+          return null;
+        })
+    );
+  }
+
+  const results = await Promise.allSettled(promises);
+  return results
+    .map(r => r.status === 'fulfilled' ? r.value : null)
+    .filter(Boolean);
+};
+
+// ─── Batch Decision Making ───────────────────────────────────────
+// Uses Gemini API sequentially with 300ms delay between calls
+// to stay under rate limits (~3 req/sec for Gemini Flash).
+// Falls back to rule engine per-profile only if quota is hit mid-batch.
+
+export const makeBatchDecisions = async (domain, profiles, memory, onProgress) => {
+  const decisions = [];
+  const DELAY_MS = 300;
+
+  for (let i = 0; i < profiles.length; i++) {
+    const profile = profiles[i];
+    try {
+      const decision = await makeDecision(domain, profile, memory);
+      decisions.push({ profile, decision });
+    } catch (err) {
+      console.warn(`[Batch] Gemini failed for profile ${i}, using fallback:`, err.message);
+      try {
+        const fallback = makeDecisionFallback(domain, profile, memory);
+        decisions.push({ profile, decision: { ...fallback, _fallback: true } });
+      } catch (e2) {
+        console.error(`[Batch] Fallback also failed for profile ${i}`);
+      }
+    }
+    if (onProgress) onProgress(i + 1, profiles.length);
+    if (i < profiles.length - 1) {
+      await new Promise(r => setTimeout(r, DELAY_MS));
+    }
+  }
+  return decisions.filter(d => d.decision !== null);
+};
+
 // ─── Quota detection helper ──────────────────────────────────────
 
 function _isQuotaError(err) {

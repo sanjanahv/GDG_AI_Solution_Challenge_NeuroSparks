@@ -1,6 +1,11 @@
 {
   "job": {
-    "positive": [],
+    "positive": [
+      "Skills",
+      "Performance Rating",
+      "Education Level",
+      "Projects Completed"
+    ],
     "negative": []
   },
   "college": {

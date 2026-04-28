@@ -3,7 +3,7 @@ import {
   Briefcase, GraduationCap, Building2, Microscope, 
   Key, RefreshCw, ThumbsUp, ThumbsDown, Activity, Shield, AlertTriangle, CheckCircle, XCircle, Zap, Flag
 } from 'lucide-react';
-import { generateProfile, makeDecision, setApiKey as setLlmApiKey } from './services/llm';
+import { generateProfile, makeDecision, generateBatchProfiles, makeBatchDecisions, setApiKey as setLlmApiKey } from './services/llm';
 import { getMemory, addFeedback, getStats, incrementDecisions } from './services/rl';
 import { classifyWithDetails } from './services/attributeClassifier';
 import { analyzeBias, applyCorrection, getRecommendation, storeDecision, rewardAttribute, penalizeAttribute, healthCheck } from './services/api';
@@ -17,6 +17,9 @@ function App() {
   const [stats, setStats] = useState(getStats());
   const [sessionHistory, setSessionHistory] = useState([]);
   const [activeTab, setActiveTab] = useState('analysis');
+  const [batchResults, setBatchResults] = useState([]);
+  const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0, phase: '' });
+  const [selectedBatchIdx, setSelectedBatchIdx] = useState(null);
   
   // AIF360 state
   const [biasMetrics, setBiasMetrics] = useState(null);
@@ -42,44 +45,68 @@ function App() {
   }, []);
 
   const handleGenerate = async () => {
-    if (!apiKey) return alert("Please enter a Gemini API Key.");
+    if (!apiKey) return alert("Please enter your Gemini API Key first.");
+    if (!backendAlive) return alert("Backend must be running. Start it with: uvicorn main:app --reload");
     setLoading(true);
     setProfile(null);
     setDecision(null);
+    setBatchResults([]);
+    setSelectedBatchIdx(null);
+    setFairnessScore(null);
+    const BATCH_SIZE = 45;
     try {
-      const newProfile = await generateProfile(activeDomain);
-      setProfile(newProfile);
+      // Phase 1: Generate profiles from backend (free, instant)
+      setBatchProgress({ current: 0, total: BATCH_SIZE, phase: 'Generating profiles...' });
+      const profiles = await generateBatchProfiles(activeDomain, BATCH_SIZE);
+
+      // Phase 2: Make decisions via Gemini API (sequential, 300ms delay)
       const memory = getMemory();
-      const newDecision = await makeDecision(activeDomain, newProfile, memory);
-      setDecision(newDecision);
-      incrementDecisions();
-      setStats(getStats());
-      
-      // Phase 4: Classify attributes client-side
-      const cls = classifyWithDetails(activeDomain, newProfile.attributes || {});
-      setClassifications(cls);
-      
-      const historyEntry = { domain: activeDomain, decision: newDecision, profile: newProfile, timestamp: Date.now() };
-      setSessionHistory(prev => [historyEntry, ...prev]);
-      
-      // Store in backend for AIF360 + get fairness score
-      if (backendAlive) {
+      setBatchProgress({ current: 0, total: profiles.length, phase: 'Asking Gemini (1/' + profiles.length + ')...' });
+      const results = await makeBatchDecisions(
+        activeDomain, profiles, memory,
+        (done, total) => setBatchProgress({ current: done, total, phase: `Gemini decision ${done}/${total}...` })
+      );
+      setBatchProgress({ current: results.length, total: results.length, phase: 'Scoring fairness...' });
+
+      // Phase 3: Classify + score each, store in backend
+      const enriched = [];
+      for (let i = 0; i < results.length; i++) {
+        const { profile: p, decision: d } = results[i];
+        const cls = classifyWithDetails(activeDomain, p.attributes || {});
+        let fs = null;
         try {
           const res = await fetch('http://localhost:8000/api/decide', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               domain: activeDomain.toLowerCase(),
-              profile: newProfile.attributes || {},
-              decision: newDecision.decision,
-              weighted_attributes: (newDecision.weightedAttributes || []).map(wa => ({
+              profile: p.attributes || {},
+              decision: d.decision,
+              weighted_attributes: (d.weightedAttributes || []).map(wa => ({
                 attribute: wa.attribute, weight: wa.weight, reasoning: wa.reasoning || ''
               }))
             })
           });
           const data = await res.json();
-          setFairnessScore(data.fairness_score || null);
-        } catch (e) { console.warn('Backend scoring failed:', e); }
+          fs = data.fairness_score || null;
+        } catch (_) {}
+        enriched.push({ profile: p, decision: d, classifications: cls, fairnessScore: fs, timestamp: Date.now() - (results.length - i) });
+        incrementDecisions();
+        if (i % 5 === 0) setBatchProgress({ current: i + 1, total: results.length, phase: `Scoring ${i+1}/${results.length}...` });
+      }
+
+      setBatchResults(enriched);
+      setSessionHistory(prev => [...enriched.map(e => ({ domain: activeDomain, decision: e.decision, profile: e.profile, timestamp: e.timestamp })), ...prev]);
+      setStats(getStats());
+      setBatchProgress({ current: enriched.length, total: enriched.length, phase: 'Done!' });
+
+      // Auto-select first result for detail view
+      if (enriched.length > 0) {
+        setProfile(enriched[0].profile);
+        setDecision(enriched[0].decision);
+        setClassifications(enriched[0].classifications);
+        setFairnessScore(enriched[0].fairnessScore);
+        setSelectedBatchIdx(0);
       }
     } catch (err) {
       console.error(err);
@@ -176,11 +203,19 @@ function App() {
                 </button>
               ))}
             </div>
-            <p style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1.5rem' }}>Generate a profile to begin</p>
+            <p style={{ textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1.5rem' }}>Generate 45 profiles in one click</p>
             <button className="btn-primary" onClick={handleGenerate} disabled={loading}>
               <RefreshCw size={18} className={loading ? "animate-spin" : ""} />
-              {loading ? "Generating..." : "Generate Profile"}
+              {loading ? batchProgress.phase || "Generating..." : "⚡ Generate 45 Profiles"}
             </button>
+            {loading && batchProgress.total > 0 && (
+              <div style={{ marginTop: '1rem' }}>
+                <div className="aif360-score-bar">
+                  <div className="score-fill" style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%`, background: 'linear-gradient(90deg, var(--accent-purple), var(--accent-pink))' }}></div>
+                </div>
+                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textAlign: 'center' }}>{batchProgress.current}/{batchProgress.total}</div>
+              </div>
+            )}
           </div>
 
           <div className="panel" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
@@ -217,15 +252,56 @@ function App() {
             <button className={`tab ${activeTab === 'insights' ? 'active' : ''}`} onClick={() => setActiveTab('insights')}>Insights</button>
           </div>
 
-          {activeTab === 'analysis' && !profile && (
+          {activeTab === 'analysis' && !profile && batchResults.length === 0 && (
             <div className="empty-state">
               <Microscope size={48} color="var(--panel-border)" style={{ marginBottom: '1rem' }} />
               <p>Generate a profile and make a decision</p>
             </div>
           )}
 
-          {activeTab === 'analysis' && profile && (
+          {activeTab === 'analysis' && batchResults.length > 0 && (
             <div className="animate-fade-in" style={{ flex: 1, overflowY: 'auto', paddingRight: '0.5rem' }}>
+              {/* Batch Summary Bar */}
+              <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem', padding: '1rem', background: 'rgba(0,0,0,0.25)', borderRadius: '8px', border: '1px solid var(--panel-border)' }}>
+                <div style={{ flex: 1, textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.5rem', fontWeight: 800, fontFamily: 'var(--font-heading)', color: 'var(--stat-pos)' }}>{batchResults.filter(r => ['Hire','Approve','Admit'].includes(r.decision.decision)).length}</div>
+                  <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px' }}>Positive</div>
+                </div>
+                <div style={{ flex: 1, textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.5rem', fontWeight: 800, fontFamily: 'var(--font-heading)', color: 'var(--stat-neg)' }}>{batchResults.filter(r => !['Hire','Approve','Admit'].includes(r.decision.decision)).length}</div>
+                  <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px' }}>Negative</div>
+                </div>
+                <div style={{ flex: 1, textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.5rem', fontWeight: 800, fontFamily: 'var(--font-heading)', color: 'var(--accent-purple)' }}>{batchResults.length}</div>
+                  <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px' }}>Total</div>
+                </div>
+                <div style={{ flex: 1, textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.5rem', fontWeight: 800, fontFamily: 'var(--font-heading)', color: 'var(--accent-blue)' }}>
+                    {batchResults.filter(r => r.fairnessScore).length > 0 ? (batchResults.filter(r => r.fairnessScore).reduce((s, r) => s + (r.fairnessScore?.total_score || 0), 0) / batchResults.filter(r => r.fairnessScore).length * 100).toFixed(0) + '%' : 'N/A'}
+                  </div>
+                  <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '1px' }}>Avg Fairness</div>
+                </div>
+              </div>
+
+              {/* Batch Results Grid */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '0.5rem', marginBottom: '1.5rem', maxHeight: '200px', overflowY: 'auto', padding: '0.25rem' }}>
+                {batchResults.map((r, idx) => {
+                  const isPositive = ['Hire','Approve','Admit'].includes(r.decision.decision);
+                  const isSelected = selectedBatchIdx === idx;
+                  const grade = r.fairnessScore?.letter_grade || '?';
+                  return (
+                    <button key={idx} onClick={() => { setSelectedBatchIdx(idx); setProfile(r.profile); setDecision(r.decision); setClassifications(r.classifications); setFairnessScore(r.fairnessScore); }}
+                      style={{ padding: '0.5rem', background: isSelected ? 'rgba(157,78,221,0.15)' : 'rgba(255,255,255,0.03)', border: `1px solid ${isSelected ? 'var(--accent-purple)' : 'var(--panel-border)'}`, borderRadius: '6px', cursor: 'pointer', textAlign: 'center', transition: 'all 0.15s ease', color: 'var(--text-main)', fontSize: '0.7rem' }}>
+                      <div style={{ fontWeight: 700, marginBottom: '2px', color: isPositive ? 'var(--stat-pos)' : 'var(--stat-neg)' }}>{r.decision.decision}</div>
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.65rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.profile.name}</div>
+                      <div style={{ marginTop: '2px', fontSize: '0.6rem', fontWeight: 700, color: grade === 'A' ? 'var(--stat-pos)' : grade === 'B' ? 'var(--accent-blue)' : grade === 'C' ? 'var(--stat-caution)' : 'var(--stat-neg)' }}>{grade}</div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Selected Profile Detail */}
+              {profile && <div style={{ borderTop: '1px solid var(--panel-border)', paddingTop: '1rem', marginBottom: '0.5rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>Showing profile {selectedBatchIdx !== null ? selectedBatchIdx + 1 : '?'} of {batchResults.length} — click any card above to inspect</div>}
               <div className="profile-card">
                 <h3>{profile.name} - Profile</h3>
                 <div className="profile-grid">
