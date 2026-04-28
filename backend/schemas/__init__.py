@@ -1,1 +1,0 @@
-# backend/schemas package
