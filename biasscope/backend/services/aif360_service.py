@@ -15,13 +15,19 @@
 
 import pandas as pd
 import numpy as np
-from aif360.datasets import BinaryLabelDataset
-from aif360.metrics import BinaryLabelDatasetMetric, ClassificationMetric
-from aif360.algorithms.postprocessing import (
-    CalibratedEqOddsPostprocessing,
-    EqOddsPostprocessing,
-    RejectOptionClassification
-)
+
+try:
+    from aif360.datasets import BinaryLabelDataset
+    from aif360.metrics import BinaryLabelDatasetMetric, ClassificationMetric
+    from aif360.algorithms.postprocessing import (
+        CalibratedEqOddsPostprocessing,
+        EqOddsPostprocessing,
+        RejectOptionClassification
+    )
+    AIF360_AVAILABLE = True
+except ImportError:
+    AIF360_AVAILABLE = False
+    print("[WARN] aif360 not installed — using manual bias metrics fallback")
 
 
 # --- Decision label mappings per domain ---
@@ -144,6 +150,36 @@ def compute_bias_metrics(records, protected_attr="Gender", label_col="decision")
     Returns:
         dict with disparate_impact, statistical_parity_diff, bias_detected, etc.
     """
+    if not AIF360_AVAILABLE:
+        # Manual DI calculation fallback
+        priv_pos = priv_tot = unpriv_pos = unpriv_tot = 0
+        for r in records:
+            attrs = r.get("attributes", r.get("profile", r))
+            pv = None
+            for k, v in attrs.items():
+                if k.lower() == protected_attr.lower():
+                    pv = v; break
+            if pv is None: continue
+            enc = _encode_protected_attribute(pv, protected_attr)
+            dec_raw = r.get("decision", "")
+            dec = DECISION_MAP.get(str(dec_raw), 0) if isinstance(dec_raw, str) else int(dec_raw)
+            if enc == 1:
+                priv_tot += 1; priv_pos += dec
+            else:
+                unpriv_tot += 1; unpriv_pos += dec
+        pr = priv_pos / max(priv_tot, 1)
+        ur = unpriv_pos / max(unpriv_tot, 1)
+        di = ur / max(pr, 0.001)
+        spd = ur - pr
+        bd = di < 0.8 or di > 1.25
+        return {
+            "disparate_impact": round(di, 4), "statistical_parity_diff": round(spd, 4),
+            "bias_detected": bd, "severity": "high" if (di < 0.5 or di > 2.0) else ("moderate" if bd else "none"),
+            "num_records": len(records), "protected_attribute": protected_attr, "method": "manual",
+            "threshold_info": {"fair_range": "0.80-1.25", "current_value": round(di, 4),
+                "interpretation": "FAIR" if not bd else f"BIASED — DI {round(di,4)}"}
+        }
+
     dataset, privileged, unprivileged = _build_dataset(records, protected_attr, label_col)
 
     if dataset is None:
@@ -222,6 +258,9 @@ def apply_post_processing(
     Returns:
         dict with original_metrics, corrected_metrics, corrected_decisions, algorithm_used
     """
+    if not AIF360_AVAILABLE:
+        return {"success": False, "error": "AIF360 not installed. Install with: pip install aif360"}
+
     dataset, privileged, unprivileged = _build_dataset(records, protected_attr, label_col)
 
     if dataset is None:

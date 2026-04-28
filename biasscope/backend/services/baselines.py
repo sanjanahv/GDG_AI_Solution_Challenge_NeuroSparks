@@ -12,7 +12,7 @@ Runs each policy over n seeds, returns mean DI for comparison.
 
 import random
 from services.profile_generator import generate_profile
-from services.attribute_classifier import classify_attributes, _normalize_key
+from services.attribute_classifier import classify_attributes
 from services.aif360_service import compute_bias_metrics
 
 

@@ -17,7 +17,10 @@ from services.profile_generator import generate_profile, get_difficulty_config
 from services.fairness_scorer import grade_session, score_single_decision
 from services.ablation import run_ablation
 from services.baselines import compare_policies
-from services.rl_memory import load_memory, get_session_decisions, add_session_decision, clear_session_decisions
+from services.rl_memory import load_memory
+
+# In-memory session decision storage
+_session_decisions = {"job": [], "loan": [], "college": []}
 
 router = APIRouter()
 
@@ -57,7 +60,7 @@ def reset_session(request: SessionResetRequest):
     config = get_difficulty_config(request.difficulty)
 
     # Clear existing session decisions
-    clear_session_decisions(domain)
+    _session_decisions[domain] = []
 
     # Store session config
     _active_sessions[domain] = {
@@ -98,7 +101,7 @@ def session_step(request: SessionStepRequest):
 
     # Score this decision
     memory = load_memory()
-    session_decisions = get_session_decisions(domain)
+    session_decisions = _session_decisions.get(domain, [])
 
     fairness = score_single_decision(
         domain=domain,
@@ -110,7 +113,7 @@ def session_step(request: SessionStepRequest):
     )
 
     # Store decision
-    add_session_decision(domain, {
+    _session_decisions.setdefault(domain, []).append({
         "profile": {"attributes": request.profile},
         "decision": request.decision,
         "weighted_attributes": request.weighted_attributes,
@@ -139,7 +142,8 @@ def session_step(request: SessionStepRequest):
 def session_score(domain: str = "job"):
     """Get the current session grade."""
     memory = load_memory()
-    result = grade_session(domain, memory=memory)
+    decisions = _session_decisions.get(domain.lower(), [])
+    result = grade_session(decisions, domain, rl_memory=memory)
     return result
 
 
@@ -147,7 +151,7 @@ def session_score(domain: str = "job"):
 def session_state(domain: str = "job"):
     """Get full session state."""
     session = _active_sessions.get(domain.lower())
-    decisions = get_session_decisions(domain)
+    decisions = _session_decisions.get(domain.lower(), [])
 
     return {
         "active_session": session is not None,

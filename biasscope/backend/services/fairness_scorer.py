@@ -7,7 +7,17 @@
 # with independently computed, signed, interpretable terms.
 # ============================================================
 
-from services.attribute_classifier import PROTECTED_ATTRIBUTES, PROXY_ATTRIBUTES, REDUNDANT_ATTRIBUTES
+from services.attribute_classifier import PROTECTED_ATTRS as PROTECTED_ATTRS_LIST, REDUNDANT_PAIRS
+
+# Convert list to per-domain dict for consistency
+PROTECTED_ATTRIBUTES = {
+    "job": [a for a in PROTECTED_ATTRS_LIST if a[0].isupper()],
+    "loan": [a for a in PROTECTED_ATTRS_LIST if a[0].isupper()],
+    "college": [a for a in PROTECTED_ATTRS_LIST if a[0].isupper()],
+}
+REDUNDANT_ATTRIBUTES = {
+    d: [pair[1] for pair in pairs] for d, pairs in REDUNDANT_PAIRS.items()
+}
 
 # Domain-specific merit attributes (attributes that SHOULD drive decisions)
 MERIT_ATTRIBUTES = {

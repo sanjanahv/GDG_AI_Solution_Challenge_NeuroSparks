@@ -6,7 +6,7 @@ Outputs a ranked table showing which mechanic matters most.
 """
 
 from services.profile_generator import generate_profile
-from services.attribute_classifier import classify_attributes, PROTECTED_ATTRIBUTES, _normalize_key
+from services.attribute_classifier import classify_attributes, PROTECTED_ATTRS
 from services.aif360_service import compute_bias_metrics
 
 MECHANICS = [
@@ -34,7 +34,7 @@ def _simulate_decisions(domain: str, seeds: list, disabled_mechanic: str = "full
         # Simulate AI decision logic based on which mechanics are active
         score = 0
         for attr_name, value in attrs.items():
-            normalized = _normalize_key(attr_name)
+            normalized = attr_name.lower().replace(" ", "_")
             cls = classifications.get(attr_name, "NORMAL")
 
             # If mechanic is disabled, treat that category as NORMAL
