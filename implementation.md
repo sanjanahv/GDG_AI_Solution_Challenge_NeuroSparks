@@ -612,50 +612,44 @@ Per the evaluation criteria from your screenshot:
 
 ## 12. Financial Triage-Inspired Enhancements
 
-*Concepts adapted from the [Financial Triage Environment](https://huggingface.co/spaces/indra-dhanush/financial-triage-env) — an RL-based Indian household finance simulation with 14-term additive rewards and episode grading.*
+*Concepts adapted from the [Financial Triage Environment](https://huggingface.co/spaces/indra-dhanush/financial-triage-env) — an RL-based Indian household finance simulation with 14-term additive rewards, 3 difficulty levels, paired-seed ablation studies, and OpenEnv-compatible API.*
 
-### 12.1 Multi-Term Fairness Reward (10 Terms)
+> **Design Philosophy:** Financial Triage's core insight is that **dense, decomposed, per-step rewards** produce better learning signals than sparse episode-level scores. BiasScope applies this same principle: every AI decision gets an immediate 10-term fairness breakdown, not just a batch AIF360 score at the end.
 
-Instead of binary reward/penalize, compute a **per-decision fairness breakdown** with 10 additive terms:
+### 12.1 Multi-Term Fairness Reward (10 Terms) — ✅ BUILT
 
-| Sign | Term | Description |
-|---|---|---|
-| + | `fair_attribute_weight` | Bonus when decision weights merit-based attributes |
-| + | `diverse_outcome` | Bonus when session outcomes show demographic diversity |
-| + | `rl_alignment` | Bonus when decision aligns with rewarded RL patterns |
-| + | `transparency_score` | Bonus for clear per-attribute reasoning |
-| + | `protected_attr_ignored` | Bonus for NOT weighting protected attributes |
-| − | `protected_attr_weighted` | Penalty when Gender/Race/Age drives the decision |
-| − | `proxy_leak` | Penalty when proxy attributes (zip code ≈ race) appear |
-| − | `outcome_skew` | Penalty when session outcomes skew to one demographic |
-| − | `redundant_attr_used` | Penalty for irrelevant attributes in domain |
-| − | `inaction_streak` | Penalty for accepting all decisions without feedback |
+**Status:** Implemented in `backend/services/fairness_scorer.py` (283 lines)
 
-```python
-# backend/services/fairness_scorer.py
-def score_decision(domain, profile, decision, weighted_attrs, rl_memory):
-    breakdown = {}
-    score = 0.0
-    for attr in weighted_attrs:
-        if attr['attribute'] in PROTECTED[domain]:
-            breakdown['protected_attr_weighted'] = -0.15
-            score -= 0.15
-        elif attr['attribute'] in PROXY[domain]:
-            breakdown['proxy_leak'] = -0.10
-            score -= 0.10
-        else:
-            breakdown['fair_attribute_weight'] = breakdown.get('fair_attribute_weight', 0) + 0.10
-            score += 0.10
-    return {'score': max(0, min(1, 0.5 + score)), 'breakdown': breakdown}
-```
+Financial Triage uses 14 additive signed reward terms (on-time bill pay, APR-weighted debt service, overdraft penalty, etc.). BiasScope adapts this into a **10-term fairness breakdown** where each term is independently computed, signed, and interpretable:
 
-### 12.2 Dense Per-Decision Scoring
+| Sign | Term | Magnitude | Description |
+|---|---|---|---|
+| + | `fair_attribute_weight` | +0.08 per merit attr (cap 0.25) | Bonus when decision weights merit-based attributes |
+| + | `protected_attr_ignored` | +0.15 | Bonus for NOT weighting protected attributes |
+| + | `rl_alignment` | ±0.05 per attr (cap ±0.20) | Bonus/penalty for alignment with RL memory |
+| + | `transparency_score` | +0.04 per reasoning (cap 0.12) | Bonus for clear per-attribute reasoning |
+| + | `diverse_outcome` | +0.10 | Bonus when session outcome ratio is 30-70% |
+| − | `protected_attr_weighted` | −0.15 per attr (cap −0.30) | Penalty when Gender/Race/Age drives the decision |
+| − | `proxy_leak` | −0.10 per proxy (cap −0.20) | Penalty when proxy attributes appear |
+| − | `redundant_attr_used` | −0.08 per attr (cap −0.16) | Penalty for redundant attributes |
+| − | `outcome_skew` | −0.12 | Penalty when session outcomes skew >85% or <15% |
+| − | `inaction_streak` | −0.08 | Penalty for 3+ decisions without user feedback |
 
-Every decision gets an **immediate fairness score (0-1)** — not just batch analysis. The frontend shows a real-time fairness gauge on each decision, similar to Financial Triage's dense per-step reward.
+**Final score** = `clamp(0.5 + sum(all_terms), 0, 1)` → Letter grade A/B/C/D/F.
 
-### 12.3 Session Grading (`grade_session`)
+> **Key difference from Financial Triage:** FT rewards are about *financial* health (pay bills, avoid overdraft). BiasScope rewards are about *fairness* health (use merit attributes, avoid protected attributes). The decomposition structure is identical.
 
-At any point, compute an **overall session fairness grade (0-1)** across weighted criteria:
+### 12.2 Dense Per-Decision Scoring — ✅ BUILT
+
+**Status:** Endpoint `POST /api/score-decision` in `decision.py`
+
+Every decision gets an **immediate fairness score (0-1)** — not just batch analysis. Mirrors Financial Triage's dense per-step reward where the GRPO optimizer sees `_last_breakdown['total']` as the scalar reward for each step.
+
+### 12.3 Session Grading (`grade_session`) — ✅ BUILT
+
+**Status:** Endpoint `GET /api/session-grade/{domain}` in `decision.py`
+
+Mirrors Financial Triage's `grade_episode()` in `tasks.py`. Key design choice from FT: **the session grade is separate from the per-decision reward**. FT's `grade_episode` applies difficulty-specific weights across outcome dimensions and is reserved for the bar-chart metric. Similarly, BiasScope's `grade_session` uses different weighted criteria than `score_single_decision`:
 
 | Weight | Criterion | Measure |
 |---|---|---|
@@ -666,50 +660,224 @@ At any point, compute an **overall session fairness grade (0-1)** across weighte
 | 10% | RL Alignment | Alignment with RL memory patterns |
 | 10% | Proxy Resistance | % decisions free from proxy contamination |
 
-Display as a **letter grade (A/B/C/D/F)** in the Bias Tracker sidebar.
+### 12.4 Difficulty Profiles (Easy / Medium / Hard Bias) — 🔨 TO BUILD
 
-### 12.4 Difficulty Profiles (Easy / Medium / Hard Bias)
+Financial Triage calibrates 3 difficulty levels with surgical precision: Easy is near-solved (0.999), Medium shows clean policy ordering, Hard gives the model room to beat the teacher (heuristic only edges random by Δ≈0.002). BiasScope should mirror this:
 
-Inspired by Financial Triage's 3 difficulty levels:
+| Difficulty | Duration | Profile Design | Active Mechanics | Grade Focus |
+|---|---|---|---|---|
+| **Easy** | 5 decisions | Obvious merit gaps, no proxy traps, clear protected attribute usage | Basic attribute classification only | Can user spot obvious bias? |
+| **Medium** | 10 decisions | Similar merit, differ on protected attributes, 1 proxy attribute injected | Proxy detection active, RL memory injection | Can user detect subtle bias? |
+| **Hard** | 15 decisions | Proxy-heavy profiles, hidden correlations, ambiguous cases, conflicting merit signals | All mechanics active + partial observability (hidden classifications) | Can user detect proxy discrimination without hints? |
 
-| Difficulty | Profile Behavior | What It Tests |
+**Implementation:** Add a `difficulty` parameter to profile generation. Hard profiles should have proxy attributes that correlate with protected attributes in non-obvious ways (e.g., "University: Legacy Prep Academy" → wealth proxy → race proxy).
+
+```python
+# backend/services/profile_generator.py
+DIFFICULTY_CONFIGS = {
+    "easy": {
+        "duration": 5,
+        "inject_protected_bias": True,   # AI obviously weights gender
+        "inject_proxy": False,
+        "hide_classifications": False,
+    },
+    "medium": {
+        "duration": 10,
+        "inject_protected_bias": False,   # Subtle — similar merit
+        "inject_proxy": True,             # 1 proxy attribute
+        "hide_classifications": False,
+    },
+    "hard": {
+        "duration": 15,
+        "inject_protected_bias": False,
+        "inject_proxy": True,             # Multiple proxies
+        "hide_classifications": True,     # User must identify risks
+    },
+}
+```
+
+### 12.5 Expanded Action Space (3 → 7 actions) — 🔨 TO BUILD
+
+Financial Triage has 11 distinct actions (pay_bill_full, pay_minimum, defer_bill, transfer_to_savings, etc.). BiasScope expands from 3 to 7:
+
+| Action | Status | Description | Backend Route |
+|---|---|---|---|
+| `generate_profile` | ✅ Built | Generate a new applicant | Frontend Gemini call |
+| `reward_attribute` | ✅ Built | Mark attribute as fair | `POST /api/reward` |
+| `penalize_attribute` | ✅ Built | Mark attribute as biased | `POST /api/penalize` |
+| `flag_proxy` | 🔨 New | Flag attribute as proxy for protected class | `POST /api/flag-proxy` |
+| `request_correction` | 🔨 New | Trigger AIF360 post-processing on session | `POST /api/apply-correction` (exists) |
+| `override_decision` | 🔨 New | Manually flip the AI's decision | `POST /api/override` |
+| `request_explanation` | 🔨 New | Ask Gemini to explain attribute weighting | `POST /api/explain` |
+
+> **Financial Triage parallel:** FT's `negotiate_bill` action is probabilistic (may fail). BiasScope's `request_correction` is similarly uncertain — AIF360 post-processing may or may not flip the decision depending on the algorithm and batch statistics.
+
+### 12.6 Fairness Ablation Study — 🔨 TO BUILD
+
+Financial Triage's ablation is rigorous: same heuristic, same n=40 seeds, one mechanic disabled per run, with **95% paired bootstrap CI**. On Hard, medical emergencies are the single largest binding constraint (+0.172), followed by interest accrual (+0.080).
+
+BiasScope should adopt the **same paired-seed methodology**:
+
+```
+Ablation (Job Domain, n=30 seeds)      Mean DI    Δ vs Full    Interpretation
+─────────────────────────────────────────────────────────────────────────────
+full_protection                         0.72       —            Baseline
+no_gender_check                         0.68       −0.04        Gender protection is binding
+no_age_check                            0.85       +0.13        Age was main bias source ⭐
+no_proxy_detection                      0.70       −0.02        Proxy detection small effect
+no_redundancy_filter                    0.71       −0.01        Redundancy filter negligible
+no_rl_memory                            0.74       +0.02        RL memory slightly helps
+```
+
+**Key insight from FT:** Sort ablations by effect size. The binding constraint tells users *where to focus their debiasing effort*. Output: **"Age bias is your biggest problem, not gender"**
+
+### 12.7 Heuristic Baselines (4 comparison policies) — 🔨 TO BUILD
+
+Financial Triage compares 4 policies with multi-seed evaluation (n=60): `heuristic`, `greedy_apr`, `random_valid`, `do_nothing`. BiasScope mirrors:
+
+| Baseline | BiasScope Meaning | Expected DI | Purpose |
+|---|---|---|---|
+| **do_nothing** | Accept all AI decisions, no feedback | ~0.65 | Null baseline (worst) |
+| **random_feedback** | Random reward/penalize on each attribute | ~0.80 | Random baseline |
+| **current_ai** | Gemini + RL memory (user's actual session) | varies | Where user currently sits |
+| **attribute_blind** | Decision ignoring all protected + proxy attrs | ~0.98 | Upper bound (fairest) |
+
+Display as a **spectrum bar**: `do_nothing ← random ← [You Are Here] → attribute_blind`
+
+> **FT insight:** On Hard, `greedy_apr` (textbook advice) scores *below* `do_nothing` because it drains checking ahead of bills. Similarly, a naive "always penalize gender" strategy in BiasScope may score worse than random if it causes the AI to over-compensate via proxy attributes.
+
+### 12.8 Seeded Reproducible Profile Generation — 🔨 NEW
+
+**Not in original implementation.md. Directly from Financial Triage.**
+
+FT seeds every random element: bill jitter (±15%), UPI micro-spend probability, medical emergency timing. The stochasticity audit shows ₹3,288 std in day-10 checking balance across 30 seeds, but σ(score)=0 — state is stochastic but the grader is deterministic.
+
+BiasScope should seed profile generation so:
+- **Same seed → same profiles** (reproducible demos)
+- **Ablation studies use matched seeds** (paired comparisons)
+- **State evolves stochastically** (different AI decisions) but **grading is deterministic**
+
+```python
+# backend/services/profile_generator.py
+import random
+
+def generate_profile(domain: str, seed: int = None, difficulty: str = "medium"):
+    rng = random.Random(seed)  # Isolated RNG, won't affect global state
+    # ... use rng.choice(), rng.randint() etc.
+```
+
+### 12.9 Anti-Gaming Churn Gating — 🔨 NEW
+
+**Not in original implementation.md. Directly from Financial Triage.**
+
+FT gates savings growth reward against **same-day withdraw-and-redeposit churn** — you can't game the reward by moving money back and forth. The invariant test (`tests/test_reward_properties.py`) explicitly checks this.
+
+BiasScope equivalent: detect **reward-then-penalize cycling** on the same attribute. If a user clicks reward → penalize → reward on "Gender" within the same session, the RL memory should:
+1. Not count this as 3 separate feedback events (inflating engagement score)
+2. Flag it as "conflicted" rather than "rewarded"
+3. Only count the **net final state** for session grading
+
+```python
+# Enhancement to rl_memory.py
+def _detect_churn(domain, attribute, action, feedback_log):
+    """Detect reward/penalize cycling on same attribute."""
+    recent = [f for f in feedback_log[-10:] 
+              if f['domain'] == domain and f['attribute'] == attribute]
+    if len(recent) >= 2:
+        actions = [f['action'] for f in recent]
+        if actions[-1] != actions[-2]:  # Flip detected
+            return True
+    return False
+```
+
+### 12.10 Partial Observability Mode — 🔨 NEW
+
+**Not in original implementation.md. Directly from Financial Triage.**
+
+FT's informal-lender observation hides the true 240-365% APR behind a misleading daily-rate label. The observation *undersells* the danger — the agent must learn that the daily rate implies a predatory annualized figure.
+
+BiasScope equivalent for **Hard difficulty**: hide attribute classifications initially. User sees the raw profile but NOT the NORMAL/AMBIGUOUS/PROTECTED labels. User must identify risky attributes themselves, then can "reveal" the classification to check their intuition.
+
+This transforms BiasScope from a passive dashboard into an **active learning tool** — teaching users to recognize bias patterns themselves.
+
+### 12.11 Real-Statistics Calibration — 🔨 NEW
+
+**Not in original implementation.md. Directly from Financial Triage.**
+
+FT calibrates against published Indian-finance statistics:
+- RBI Financial Literacy Survey 2024: 27% adult literacy rate
+- NSSO health expenditure: mean OOP ₹1,69,504
+- Average household debt service ratio: 25.7%
+
+BiasScope should calibrate bias thresholds and profile distributions against real data:
+
+| Domain | Calibration Source | Statistic |
 |---|---|---|
-| **Easy** | Obvious merit differences, no protected attribute traps | Can user spot clearly fair/unfair decisions? |
-| **Medium** | Similar merit, differ on protected attributes | Can user detect when protected attributes tip the scale? |
-| **Hard** | Proxy attributes, hidden correlations | Can user detect proxy discrimination? |
+| Job | EEOC Charge Statistics 2023 | Gender discrimination: 27.1% of all charges |
+| Job | LinkedIn Workforce Report | Women in tech: 26.7% |
+| Loan | HMDA Data (Fed Reserve) | Black applicant denial rate 2.5× white |
+| Loan | CFPB Fair Lending Report | Age-based denial disparity: 1.4× for 60+ |
+| College | NACAC Admission Trends | Legacy admit rate 3× non-legacy |
 
-### 12.5 Expanded Action Space (3 → 7 actions)
+> **Caveat (borrowed from FT):** These statistics are narrative context, not calibration targets. The grader is a design object, not an econometric estimate.
 
-| Action | Description |
+### 12.12 OpenEnv-Style Session API — 🔨 NEW
+
+**Not in original implementation.md. Directly from Financial Triage.**
+
+FT follows the OpenEnv standard with session-oriented endpoints. BiasScope can adopt a similar structured flow:
+
+| Endpoint | Purpose |
 |---|---|
-| `generate_profile` | Generate a new applicant (existing) |
-| `reward_attribute` | Mark attribute as fair (existing) |
-| `penalize_attribute` | Mark attribute as biased (existing) |
-| `flag_proxy` | **NEW** — Flag attribute as proxy for protected class |
-| `request_correction` | **NEW** — Trigger AIF360 post-processing |
-| `override_decision` | **NEW** — Manually flip the AI's decision |
-| `request_explanation` | **NEW** — Ask AI to explain attribute weighting |
+| `POST /api/session/reset` | Start a new session with domain + difficulty + seed |
+| `POST /api/session/step` | Submit one action (generate, reward, penalize, flag, override, explain) |
+| `GET /api/session/score` | Get current session grade (separate from per-step reward) |
+| `GET /api/session/state` | Get full session state (decisions, memory, metrics) |
 
-### 12.6 Fairness Ablation Study
+This enables:
+- **Structured demo walkthroughs** (reset → step through decisions → show final grade)
+- **Automated evaluation** (script 60 seeds through the session API)
+- **Future training data export** (session logs → SFT dataset for fine-tuning)
 
-Run profiles through AIF360 with one protection disabled at a time:
-```
-full_protection:    DI = 0.72 (biased)
-no_gender_check:    DI = 0.68 → Gender is binding (Δ = -0.04)
-no_age_check:       DI = 0.85 → Age was main bias source (Δ = +0.13)
-no_proxy_detection: DI = 0.70 → Proxies small effect (Δ = -0.02)
-```
-Tells users: **"Age bias is your biggest problem, not gender"**
+---
 
-### 12.7 Heuristic Baselines (3 comparison policies)
+## 13. Hackathon Rubric Mapping
 
-| Baseline | Description | Purpose |
+*How each component maps to the GDG Solution Challenge evaluation criteria:*
+
+| Weight | Criterion | BiasScope Evidence |
 |---|---|---|
-| **Random** | Random accept/reject, no attribute weighting | Lower bound |
-| **Attribute-Blind** | Decision ignoring protected + proxy attributes | Upper bound |
-| **Current AI** | Gemini decision with RL memory | Where AI currently sits |
+| 40% | **Innovation** | 10-term additive fairness reward (Financial Triage-inspired), 3 AIF360 post-processing algorithms, RL memory bank with churn gating, proxy bias detection, paired-seed ablation methodology, 3 difficulty levels, partial observability mode |
+| 30% | **Story / Narrative** | implementation.md (this document), README.md, interactive demo walkthrough, 3 real-world domains (hiring, lending, admissions) with EEOC/HMDA-calibrated statistics |
+| 20% | **Working Prototype** | FastAPI backend (7 routes), React+Vite frontend, AIF360 integration, live Gemini API decisions, real-time fairness gauge, session grading dashboard |
+| 10% | **Technical Depth** | Seeded reproducibility, environment ablation with bootstrap CI, 4 heuristic baselines, OpenEnv-compatible API, attribute classification engine |
 
-Display as: `Random ← [Current AI] → Attribute-Blind`
+---
+
+## 14. Implementation Status
+
+| Component | Status | File |
+|---|---|---|
+| FastAPI skeleton + CORS | ✅ Done | `backend/main.py` |
+| AIF360 bias metrics + post-processing | ✅ Done | `backend/services/aif360_service.py` |
+| RL memory bank (reward/penalize/sync) | ✅ Done | `backend/services/rl_memory.py` |
+| Attribute classifier (4 categories) | ✅ Done | `backend/services/attribute_classifier.py` |
+| 10-term fairness scorer | ✅ Done | `backend/services/fairness_scorer.py` |
+| Session grading | ✅ Done | `backend/services/fairness_scorer.py` |
+| Decision routes (classify, store, score) | ✅ Done | `backend/routers/decision.py` |
+| Feedback routes (reward, penalize, sync) | ✅ Done | `backend/routers/feedback.py` |
+| Bias analysis routes (analyze, correct) | ✅ Done | `backend/routers/bias.py` |
+| Pydantic schemas | ✅ Done | `backend/schemas/domains.py` |
+| React frontend (App + services) | ✅ Done | `frontend/src/App.jsx` |
+| Seeded profile generator | 🔨 Todo | `backend/services/profile_generator.py` |
+| Difficulty profiles (Easy/Med/Hard) | 🔨 Todo | `backend/services/profile_generator.py` |
+| Expanded actions (flag, override, explain) | 🔨 Todo | `backend/routers/decision.py` |
+| Fairness ablation engine | 🔨 Todo | `backend/services/ablation.py` |
+| Heuristic baselines (4 policies) | 🔨 Todo | `backend/services/baselines.py` |
+| Anti-gaming churn gating | 🔨 Todo | `backend/services/rl_memory.py` |
+| Partial observability mode | 🔨 Todo | Frontend + `profile_generator.py` |
+| OpenEnv session API | 🔨 Todo | `backend/routers/session.py` |
+| Real-statistics calibration | 🔨 Todo | `backend/data/calibration.json` |
 
 ---
 
@@ -733,3 +901,4 @@ npm run dev
 
 *Built for GDG Solution Challenge 2026 · Neuro Sparks · RVCE*
 *Financial Triage concepts adapted from indra-dhanush/financial-triage-env (MIT License)*
+*Any bias statistic cited in prose is narrative context, not a calibration target.*
