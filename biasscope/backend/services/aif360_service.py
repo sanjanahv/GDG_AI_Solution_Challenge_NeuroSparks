@@ -73,9 +73,16 @@ def _encode_protected_attribute(value, attr_name):
         return RACE_MAP.get(str(value), 0)
     if "age" in attr_lower:
         try:
-            age = int(value)
+            str_val = str(value).strip()
+            # Handle age ranges like "25-34" by averaging
+            if '-' in str_val and not str_val.startswith('-'):
+                parts = str_val.split('-')
+                age = int((int(parts[0].strip()) + int(parts[1].strip())) / 2)
+            else:
+                # Handle plain numbers, possibly with '+' suffix like "65+"
+                age = int(str_val.rstrip('+'))
             return 1 if age < 40 else 0  # Young=1 (privileged), Old=0
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, IndexError):
             return 0
     # Default: try to interpret as binary
     if isinstance(value, (int, float)):
@@ -255,11 +262,17 @@ def apply_post_processing(
         - "eq_odds": EqOddsPostprocessing
         - "reject_option": RejectOptionClassification
 
+    FIX: The original code used identical datasets for ground truth and
+    predictions, which caused the post-processor to either do nothing or
+    crash. This version synthesizes a "fair ground truth" where favorable
+    outcomes are distributed equally across demographic groups.
+
     Returns:
         dict with original_metrics, corrected_metrics, corrected_decisions, algorithm_used
     """
     if not AIF360_AVAILABLE:
-        return {"success": False, "error": "AIF360 not installed. Install with: pip install aif360"}
+        # Manual correction fallback — flip decisions to equalize rates
+        return _manual_correction_fallback(records, protected_attr)
 
     dataset, privileged, unprivileged = _build_dataset(records, protected_attr, label_col)
 
@@ -284,25 +297,55 @@ def apply_post_processing(
     if np.isinf(orig_spd) or np.isnan(orig_spd):
         orig_spd = 0.0
 
-    # --- Apply post-processing ---
-    # For post-processing, we need "predicted" labels and "actual" labels.
-    # In our case, the AI's decisions ARE the predictions.
-    # We treat them as both the prediction and the "ground truth" for the purpose
-    # of the post-processing correction (since we don't have separate ground truth).
-    # The post-processor will adjust the predictions to be fairer.
+    # --- Synthesize a FAIR ground truth ---
+    # The key insight: AIF360 post-processing needs ground truth != predictions.
+    # Since we have no real ground truth, we create one where the overall positive
+    # rate is preserved but distributed EQUALLY across demographic groups.
+    # This tells the post-processor: "here's what fair decisions would look like."
 
+    dataset_true = dataset.copy(deepcopy=True)
     dataset_pred = dataset.copy(deepcopy=True)
+
+    df = dataset.convert_to_dataframe()[0]
+    overall_positive_rate = df[label_col].mean()
+
+    # Create fair labels: each group gets the overall positive rate
+    fair_labels = np.zeros(len(df))
+    for group_val in [0, 1]:
+        group_mask = (df[protected_attr] == group_val).values
+        group_size = group_mask.sum()
+        if group_size == 0:
+            continue
+        n_positive = max(1, int(round(overall_positive_rate * group_size)))
+        n_positive = min(n_positive, group_size)
+
+        # Assign positive labels to first n_positive records in this group
+        group_indices = np.where(group_mask)[0]
+        # Shuffle to avoid order bias
+        rng = np.random.RandomState(42)
+        rng.shuffle(group_indices)
+        fair_labels[group_indices[:n_positive]] = 1.0
+
+    dataset_true.labels = fair_labels.reshape(-1, 1)
+
+    # Add synthetic scores (confidence) to enable reject_option to work
+    # Use a simple distance-from-threshold as proxy for confidence
+    scores = np.where(dataset_pred.labels == 1, 0.7, 0.3)
+    # Add noise to create a "borderline" zone
+    rng = np.random.RandomState(42)
+    scores = scores + rng.uniform(-0.2, 0.2, size=scores.shape)
+    scores = np.clip(scores, 0.01, 0.99)
+    dataset_pred.scores = scores.reshape(-1, 1)
 
     try:
         if algorithm == "calibrated_eq_odds":
             postprocessor = CalibratedEqOddsPostprocessing(
                 privileged_groups=privileged,
                 unprivileged_groups=unprivileged,
-                cost_constraint="weighted",  # balanced between FPR and FNR
+                cost_constraint="weighted",
                 seed=42
             )
-            # Fit on the original dataset (as "true" labels) and predicted dataset
-            corrected_dataset = postprocessor.fit_predict(dataset, dataset_pred)
+            corrected_dataset = postprocessor.fit_predict(dataset_true, dataset_pred)
 
         elif algorithm == "eq_odds":
             postprocessor = EqOddsPostprocessing(
@@ -310,21 +353,21 @@ def apply_post_processing(
                 unprivileged_groups=unprivileged,
                 seed=42
             )
-            corrected_dataset = postprocessor.fit_predict(dataset, dataset_pred)
+            corrected_dataset = postprocessor.fit_predict(dataset_true, dataset_pred)
 
         elif algorithm == "reject_option":
             postprocessor = RejectOptionClassification(
                 privileged_groups=privileged,
                 unprivileged_groups=unprivileged,
-                low_class_thresh=0.01,
-                high_class_thresh=0.99,
+                low_class_thresh=0.2,
+                high_class_thresh=0.8,
                 num_class_thresh=100,
                 num_ROC_margin=50,
                 metric_name="Statistical parity difference",
                 metric_ub=0.05,
                 metric_lb=-0.05
             )
-            corrected_dataset = postprocessor.fit_predict(dataset, dataset_pred)
+            corrected_dataset = postprocessor.fit_predict(dataset_true, dataset_pred)
 
         else:
             return {
@@ -333,14 +376,14 @@ def apply_post_processing(
             }
 
     except Exception as e:
-        return {
-            "success": False,
-            "error": f"Post-processing failed: {str(e)}",
-            "original_metrics": {
-                "disparate_impact": round(orig_di, 4),
-                "statistical_parity_diff": round(orig_spd, 4),
-            }
+        # If AIF360 post-processing still fails, use manual correction
+        manual_result = _manual_correction_fallback(records, protected_attr)
+        manual_result["algorithm_note"] = f"AIF360 {algorithm} failed ({str(e)}), used manual equalization instead."
+        manual_result["original_metrics"] = {
+            "disparate_impact": round(orig_di, 4),
+            "statistical_parity_diff": round(orig_spd, 4),
         }
+        return manual_result
 
     # --- Compute CORRECTED metrics ---
     corr_metric = BinaryLabelDatasetMetric(
@@ -357,14 +400,12 @@ def apply_post_processing(
 
     # --- Extract corrected decisions ---
     corrected_labels = corrected_dataset.labels.flatten().tolist()
-    original_labels = dataset.labels.flatten().tolist()
+    original_labels = dataset_pred.labels.flatten().tolist()
 
-    # Count how many decisions were flipped
     flipped_count = sum(
         1 for o, c in zip(original_labels, corrected_labels) if o != c
     )
 
-    # Map corrected labels back to decision strings
     reverse_map = {1: "Favorable", 0: "Unfavorable"}
     corrected_decisions = [reverse_map.get(int(l), "Unknown") for l in corrected_labels]
 
@@ -391,6 +432,132 @@ def apply_post_processing(
         },
         "corrected_decisions": corrected_decisions,
         "protected_attribute": protected_attr,
+    }
+
+
+def _manual_correction_fallback(records, protected_attr):
+    """
+    Manual bias correction when AIF360 is not available.
+    Equalizes positive outcome rates across demographic groups by
+    flipping the minimum number of decisions needed.
+    """
+    # Group records by protected attribute value
+    groups = {}  # group_val -> [list of (index, decision_val)]
+    for i, r in enumerate(records):
+        attrs = r.get("attributes", r.get("profile", r))
+        pv = None
+        for k, v in attrs.items():
+            if k.lower() == protected_attr.lower():
+                pv = v
+                break
+        if pv is None:
+            continue
+        enc = _encode_protected_attribute(pv, protected_attr)
+        dec_raw = r.get("decision", "")
+        dec = DECISION_MAP.get(str(dec_raw), 0) if isinstance(dec_raw, str) else int(dec_raw)
+        groups.setdefault(enc, []).append((i, dec))
+
+    if len(groups) < 2:
+        return {
+            "success": False,
+            "error": "Need both privileged and unprivileged groups for correction.",
+        }
+
+    # Compute rates
+    rates = {}
+    for gv, entries in groups.items():
+        pos = sum(d for _, d in entries)
+        rates[gv] = pos / len(entries) if entries else 0
+
+    # Target: overall positive rate
+    all_decisions = [d for entries in groups.values() for _, d in entries]
+    target_rate = sum(all_decisions) / len(all_decisions) if all_decisions else 0.5
+
+    # Flip decisions in each group to match target rate
+    corrected = list(all_decisions)
+    corrected_map = {}  # original_index -> new_decision
+    flipped = 0
+
+    for gv, entries in groups.items():
+        current_pos = sum(d for _, d in entries)
+        target_pos = max(0, min(len(entries), int(round(target_rate * len(entries)))))
+        diff = target_pos - current_pos
+
+        if diff > 0:
+            # Need more positives — flip negatives to positive
+            negatives = [(idx, d) for idx, d in entries if d == 0]
+            for idx, _ in negatives[:diff]:
+                corrected_map[idx] = 1
+                flipped += 1
+        elif diff < 0:
+            # Need fewer positives — flip positives to negative
+            positives = [(idx, d) for idx, d in entries if d == 1]
+            for idx, _ in positives[:abs(diff)]:
+                corrected_map[idx] = 0
+                flipped += 1
+
+    # Build corrected decisions list
+    corrected_decisions = []
+    for i, r in enumerate(records):
+        if i in corrected_map:
+            corrected_decisions.append("Favorable" if corrected_map[i] == 1 else "Unfavorable")
+        else:
+            dec_raw = r.get("decision", "")
+            dec = DECISION_MAP.get(str(dec_raw), 0) if isinstance(dec_raw, str) else int(dec_raw)
+            corrected_decisions.append("Favorable" if dec == 1 else "Unfavorable")
+
+    # Compute corrected metrics
+    priv_pos = priv_tot = unpriv_pos = unpriv_tot = 0
+    for gv, entries in groups.items():
+        for idx, _ in entries:
+            new_dec = corrected_map.get(idx, DECISION_MAP.get(str(records[idx].get("decision", "")), 0))
+            if gv == 1:
+                priv_tot += 1
+                priv_pos += new_dec
+            else:
+                unpriv_tot += 1
+                unpriv_pos += new_dec
+
+    pr = priv_pos / max(priv_tot, 1)
+    ur = unpriv_pos / max(unpriv_tot, 1)
+
+    # Handle DI edge cases properly instead of masking with 0.001
+    if pr == 0 and ur == 0:
+        corr_di = 1.0  # Both groups have 0% positive rate — perfectly "equal"
+    elif pr == 0:
+        corr_di = float('inf')  # Unprivileged has positive, privileged has 0
+    else:
+        corr_di = ur / pr
+
+    # Clamp to a reportable range
+    if np.isinf(corr_di) or np.isnan(corr_di):
+        corr_di = 0.0
+
+    return {
+        "success": True,
+        "algorithm_used": "manual_equalization",
+        "algorithm_description": (
+            "Manual Equalization: Flips the minimum number of decisions needed "
+            "to equalize positive outcome rates across demographic groups."
+        ),
+        "original_metrics": {
+            "disparate_impact": None,
+            "statistical_parity_diff": None,
+            "bias_detected": True,
+        },
+        "corrected_metrics": {
+            "disparate_impact": round(corr_di, 4),
+            "statistical_parity_diff": round(ur - pr, 4),
+            "bias_detected": corr_di < 0.8 or corr_di > 1.25,
+        },
+        "improvement": {
+            "decisions_flipped": flipped,
+            "total_decisions": len(records),
+            "flip_percentage": round(flipped / max(len(records), 1) * 100, 1),
+        },
+        "corrected_decisions": corrected_decisions,
+        "protected_attribute": protected_attr,
+        "method": "manual_fallback",
     }
 
 

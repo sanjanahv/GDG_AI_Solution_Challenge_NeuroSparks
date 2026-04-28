@@ -9,7 +9,32 @@ export const CLASS = Object.freeze({
   NORMAL:    'NORMAL',     // 🟢 Safe, directly relevant to decision
   AMBIGUOUS: 'AMBIGUOUS',  // 🟡 Proxy for protected attributes
   REDUNDANT: 'REDUNDANT',  // 🔴 Duplicates another attribute
+  UNKNOWN:   'UNKNOWN',    // ⚪ Not in any known list — needs review
 });
+
+// ─── Known safe/merit attributes (prevents false UNKNOWN flags) ──────────────
+
+const KNOWN_MERIT = new Set([
+  // Job
+  'experience', 'skills', 'education_level', 'projects', 'certifications',
+  'years_of_experience', 'technical_skills', 'leadership', 'performance_rating',
+  'references', 'technical_score', 'projects_completed', 'applied_role',
+  'previous_industry', 'highest_education',
+  // Loan
+  'credit_score', 'annual_income', 'employment_status', 'debt_to_income',
+  'loan_amount', 'payment_history', 'employment_length', 'savings_balance',
+  'assets', 'loan_purpose', 'existing_debt', 'loan_amount_requested',
+  // College
+  'gpa', 'sat_score', 'act_score', 'extracurriculars', 'awards',
+  'research', 'volunteer_hours', 'ap_classes', 'essay_score',
+  'recommendation_strength', 'leadership_roles', 'applied_major',
+]);
+
+// Protected attributes that should be flagged
+const PROTECTED_ATTRS = new Set([
+  'gender', 'sex', 'race', 'ethnicity', 'religion', 'age',
+  'disability', 'nationality', 'sexual_orientation',
+]);
 
 // ─── Proxy-Bias Attribute Maps (per domain) ─────────────────────────────────
 // Each key is a normalized attribute name known to be a proxy for a protected
@@ -235,10 +260,15 @@ export const classifyAttributes = (domain, attributesObject) => {
 
     if (redundantSet.has(original)) {
       result[original] = CLASS.REDUNDANT;
+    } else if (PROTECTED_ATTRS.has(norm)) {
+      result[original] = CLASS.AMBIGUOUS; // Protected attrs shown as ambiguous in UI
     } else if (norm in ambiguousMap) {
       result[original] = CLASS.AMBIGUOUS;
-    } else {
+    } else if (KNOWN_MERIT.has(norm)) {
       result[original] = CLASS.NORMAL;
+    } else {
+      // Not in any known list — flag for review
+      result[original] = CLASS.UNKNOWN;
     }
   }
 
@@ -295,6 +325,8 @@ export const classifyWithDetails = (domain, attributesObject) => {
       entry.proxiedClass = getProxiedClass(domain, attr);
     } else if (cls === CLASS.REDUNDANT) {
       entry.explanation = 'This attribute is redundant — it duplicates information already captured by another attribute in the profile.';
+    } else if (cls === CLASS.UNKNOWN) {
+      entry.explanation = '⚠️ This attribute is not in any known list. It may be a proxy for protected attributes. Use Reward/Penalize to classify it.';
     }
 
     result[attr] = entry;

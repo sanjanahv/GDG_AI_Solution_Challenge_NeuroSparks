@@ -1,19 +1,31 @@
 # backend/services/fairness_scorer.py
 # ============================================================
-# 10-Term Fairness Reward Breakdown
+# 11-Term Fairness Reward Breakdown
 # ============================================================
 # Inspired by Financial Triage Environment's 14-term additive
 # reward system. Each decision gets a decomposed fairness score
 # with independently computed, signed, interpretable terms.
+#
+# Term 11 (NEW): unknown_attr_risk — penalty when the AI
+# decision is driven by attributes the system has never seen
+# before and cannot verify as safe.
 # ============================================================
 
-from services.attribute_classifier import PROTECTED_ATTRS as PROTECTED_ATTRS_LIST, REDUNDANT_PAIRS
+from services.attribute_classifier import (
+    PROTECTED_ATTRS as PROTECTED_ATTRS_LIST,
+    REDUNDANT_PAIRS,
+    classify_attributes,
+    KNOWN_MERIT_ATTRS,
+)
 
-# Convert list to per-domain dict for consistency
+# Domain-specific PROTECTED attributes (not redundant — each domain has different ones)
 PROTECTED_ATTRIBUTES = {
-    "job": [a for a in PROTECTED_ATTRS_LIST if a[0].isupper()],
-    "loan": [a for a in PROTECTED_ATTRS_LIST if a[0].isupper()],
-    "college": [a for a in PROTECTED_ATTRS_LIST if a[0].isupper()],
+    "job": ["Gender", "Age", "Race", "Ethnicity", "Religion", "Disability",
+            "Nationality", "Sexual Orientation", "Marital Status"],
+    "loan": ["Gender", "Race", "Ethnicity", "Age", "Religion", "Disability",
+             "Nationality", "Marital Status"],
+    "college": ["Gender", "Race", "Ethnicity", "Age", "Religion", "Disability",
+                "Nationality", "Legacy Status"],
 }
 REDUNDANT_ATTRIBUTES = {
     d: [pair[1] for pair in pairs] for d, pairs in REDUNDANT_PAIRS.items()
@@ -39,10 +51,24 @@ PROXY_MAP = {
                 "Parent Occupation", "Home Language"],
 }
 
+# Positive decision strings (case-insensitive matching)
+_POSITIVE_DECISIONS = {"hire", "approve", "admit"}
 
-def score_single_decision(domain, weighted_attributes, rl_memory=None, session_history=None):
+
+def _ci_match(attr_name, attr_list):
+    """Case-insensitive membership check for attribute names."""
+    attr_lower = attr_name.lower().strip()
+    return any(attr_lower == item.lower().strip() for item in attr_list)
+
+
+def _is_positive_decision(decision_str):
+    """Case-insensitive check for positive decision strings."""
+    return str(decision_str).strip().lower() in _POSITIVE_DECISIONS
+
+
+def score_single_decision(domain, weighted_attributes, rl_memory=None, session_history=None, profile=None):
     """
-    Compute a 10-term fairness breakdown for a single decision.
+    Compute an 11-term fairness breakdown for a single decision.
     
     Returns:
         {
@@ -72,13 +98,13 @@ def score_single_decision(domain, weighted_attributes, rl_memory=None, session_h
     # ── POSITIVE TERMS ──
     
     # 1. Fair attribute weight: bonus for each merit-based attribute used
-    merit_count = sum(1 for a in attr_names if a in merits)
+    merit_count = sum(1 for a in attr_names if _ci_match(a, merits))
     fair_weight = min(merit_count * 0.08, 0.25)
     if fair_weight > 0:
         breakdown["fair_attribute_weight"] = round(fair_weight, 3)
     
     # 2. Protected attribute ignored: bonus if NO protected attributes used
-    protected_used = [a for a in attr_names if a in protected]
+    protected_used = [a for a in attr_names if _ci_match(a, protected)]
     if len(protected_used) == 0 and len(attr_names) > 0:
         breakdown["protected_attr_ignored"] = 0.15
     
@@ -104,7 +130,7 @@ def score_single_decision(domain, weighted_attributes, rl_memory=None, session_h
     # 5. Diverse outcome: bonus if session history shows diversity
     if session_history and len(session_history) >= 3:
         positive_decisions = sum(1 for h in session_history
-                                 if h.get("decision") in ["Hire", "Approve", "Admit"])
+                                 if _is_positive_decision(h.get("decision", "")))
         total = len(session_history)
         ratio = positive_decisions / total if total > 0 else 0.5
         if 0.3 <= ratio <= 0.7:
@@ -118,13 +144,13 @@ def score_single_decision(domain, weighted_attributes, rl_memory=None, session_h
         breakdown["protected_attr_weighted"] = round(penalty, 3)
     
     # 7. Proxy leak: penalty for proxy attributes
-    proxy_used = [a for a in attr_names if a in proxies]
+    proxy_used = [a for a in attr_names if _ci_match(a, proxies)]
     if proxy_used:
         penalty = min(len(proxy_used) * -0.10, -0.20)
         breakdown["proxy_leak"] = round(penalty, 3)
     
     # 8. Redundant attribute used
-    redundant_used = [a for a in attr_names if a in redundants]
+    redundant_used = [a for a in attr_names if _ci_match(a, redundants)]
     if redundant_used:
         penalty = min(len(redundant_used) * -0.08, -0.16)
         breakdown["redundant_attr_used"] = round(penalty, 3)
@@ -132,7 +158,7 @@ def score_single_decision(domain, weighted_attributes, rl_memory=None, session_h
     # 9. Outcome skew: penalty if session outcomes skew to one demographic
     if session_history and len(session_history) >= 5:
         positive_decisions = sum(1 for h in session_history
-                                 if h.get("decision") in ["Hire", "Approve", "Admit"])
+                                 if _is_positive_decision(h.get("decision", "")))
         total = len(session_history)
         ratio = positive_decisions / total if total > 0 else 0.5
         if ratio > 0.85 or ratio < 0.15:
@@ -144,6 +170,28 @@ def score_single_decision(domain, weighted_attributes, rl_memory=None, session_h
         no_feedback = sum(1 for h in recent if not h.get("feedback_given", False))
         if no_feedback >= 3:
             breakdown["inaction_streak"] = -0.08
+    
+    # 11. Unknown attribute risk: penalty when decision uses unclassified attributes
+    #     These are attributes the model was NOT trained on / not in any known list.
+    #     We classify the profile (if available) or check attr_names against known lists.
+    unknown_attrs = []
+    if profile:
+        # Use the full classifier to detect unknowns
+        classifications = classify_attributes(domain_lower, profile, use_gemini=False)
+        unknown_attrs = [a for a in attr_names if classifications.get(a) == "UNKNOWN"]
+    else:
+        # Fallback: check if attribute is in any known list
+        all_known = set(
+            PROTECTED_ATTRIBUTES.get(domain_lower, []) +
+            PROXY_MAP.get(domain_lower, []) +
+            MERIT_ATTRIBUTES.get(domain_lower, []) +
+            REDUNDANT_ATTRIBUTES.get(domain_lower, [])
+        )
+        unknown_attrs = [a for a in attr_names if a not in all_known]
+    
+    if unknown_attrs:
+        penalty = max(len(unknown_attrs) * -0.06, -0.18)
+        breakdown["unknown_attr_risk"] = round(penalty, 3)
     
     # ── COMPUTE FINAL SCORE ──
     total_reward = sum(breakdown.values())
@@ -163,14 +211,19 @@ def score_single_decision(domain, weighted_attributes, rl_memory=None, session_h
         grade = "F"
     
     # Interpretation
-    if score >= 0.80:
-        interpretation = "This decision shows strong fairness — merit-based attributes drive the outcome."
-    elif score >= 0.60:
-        interpretation = "Moderate fairness. Some bias signals detected but within acceptable range."
-    elif score >= 0.40:
-        interpretation = "Fairness concerns detected. Protected or proxy attributes may be influencing the decision."
+    if unknown_attrs:
+        unknown_warning = f" ⚠️ Unverified attributes detected: {', '.join(unknown_attrs)}."
     else:
-        interpretation = "Significant bias detected. Protected attributes are heavily influencing this decision."
+        unknown_warning = ""
+    
+    if score >= 0.80:
+        interpretation = "This decision shows strong fairness — merit-based attributes drive the outcome." + unknown_warning
+    elif score >= 0.60:
+        interpretation = "Moderate fairness. Some bias signals detected but within acceptable range." + unknown_warning
+    elif score >= 0.40:
+        interpretation = "Fairness concerns detected. Protected or proxy attributes may be influencing the decision." + unknown_warning
+    else:
+        interpretation = "Significant bias detected. Protected attributes are heavily influencing this decision." + unknown_warning
     
     return {
         "score": round(score, 3),
@@ -180,6 +233,7 @@ def score_single_decision(domain, weighted_attributes, rl_memory=None, session_h
         "interpretation": interpretation,
         "positive_terms": {k: v for k, v in breakdown.items() if v > 0},
         "negative_terms": {k: v for k, v in breakdown.items() if v < 0},
+        "unknown_attributes": unknown_attrs,
     }
 
 
@@ -211,7 +265,7 @@ def grade_session(session_history, domain, rl_memory=None):
     
     # 1. Outcome Balance (20%)
     positive = sum(1 for h in session_history
-                   if h.get("decision") in ["Hire", "Approve", "Admit"])
+                   if _is_positive_decision(h.get("decision", "")))
     total = len(session_history)
     ratio = positive / total if total > 0 else 0.5
     balance_score = 1.0 - abs(ratio - 0.5) * 2  # Perfect at 50/50
@@ -222,7 +276,7 @@ def grade_session(session_history, domain, rl_memory=None):
     for h in session_history:
         attrs = h.get("weighted_attributes", [])
         attr_names = [a.get("attribute", "") if isinstance(a, dict) else a for a in attrs]
-        if not any(a in protected for a in attr_names):
+        if not any(_ci_match(a, protected) for a in attr_names):
             clean_count += 1
     hygiene = clean_count / total if total > 0 else 1.0
     criteria["attribute_hygiene"] = round(hygiene, 3)
@@ -237,7 +291,7 @@ def grade_session(session_history, domain, rl_memory=None):
     for h in session_history:
         attrs = h.get("weighted_attributes", [])
         attr_names = [a.get("attribute", "") if isinstance(a, dict) else a for a in attrs]
-        if not any(a in proxies for a in attr_names):
+        if not any(_ci_match(a, proxies) for a in attr_names):
             proxy_clean += 1
     proxy_resist = proxy_clean / total if total > 0 else 1.0
     criteria["proxy_resistance"] = round(proxy_resist, 3)

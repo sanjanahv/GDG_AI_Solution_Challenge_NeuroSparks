@@ -18,7 +18,12 @@ from services.aif360_service import (
     PROTECTED_ATTRIBUTES,
 )
 from services.rl_memory import get_full_memory, get_stats
-from services.attribute_classifier import classify_attributes, get_classification_summary
+from services.attribute_classifier import (
+    classify_attributes,
+    get_classification_summary,
+    get_learned_proxies,
+    clear_dynamic_cache,
+)
 
 router = APIRouter()
 
@@ -86,6 +91,36 @@ def get_protected_attrs(domain: str):
 
 @router.post("/classify-attributes")
 def classify_attrs(domain: str, attributes: dict):
-    """Classify attributes as NORMAL/AMBIGUOUS/REDUNDANT/PROTECTED."""
+    """Classify attributes as NORMAL/AMBIGUOUS/REDUNDANT/PROTECTED/UNKNOWN.
+
+    NEW: Attributes not in any known list are flagged as UNKNOWN and
+    (if Gemini is available) dynamically checked for proxy bias.
+    """
     summary = get_classification_summary(domain, attributes)
     return summary
+
+
+@router.get("/learned-proxies")
+def learned_proxies():
+    """
+    Get all auto-learned proxy attributes across domains.
+    These are attributes that users penalized after they were flagged as UNKNOWN.
+    """
+    proxies = get_learned_proxies()
+    total = sum(len(v) for v in proxies.values())
+    return {
+        "learned_proxies": proxies,
+        "total_learned": total,
+        "description": (
+            "Attributes auto-learned as proxies from user penalization feedback. "
+            "Future profiles with these attributes will be flagged as AMBIGUOUS "
+            "without needing a Gemini API call."
+        ),
+    }
+
+
+@router.post("/clear-classification-cache")
+def clear_cache():
+    """Clear the Gemini dynamic classification cache (useful for testing)."""
+    clear_dynamic_cache()
+    return {"status": "cleared", "message": "Dynamic classification cache cleared."}

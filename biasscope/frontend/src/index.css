@@ -591,6 +591,16 @@ h1, h2, h3, h4, h5, h6 {
 .attr-badge.ambiguous { background: rgba(255,190,11,0.15); color: var(--stat-caution); border: 1px solid rgba(255,190,11,0.3); }
 .attr-badge.redundant { background: rgba(255,84,0,0.15); color: var(--stat-neg); border: 1px solid rgba(255,84,0,0.3); }
 .attr-badge.protected { background: rgba(255,0,110,0.15); color: var(--accent-pink); border: 1px solid rgba(255,0,110,0.3); }
+.attr-badge.unknown {
+  background: rgba(142,154,175,0.15);
+  color: #b0bec5;
+  border: 1px solid rgba(142,154,175,0.4);
+  animation: unknownPulse 2s ease-in-out infinite;
+}
+@keyframes unknownPulse {
+  0%, 100% { border-color: rgba(142,154,175,0.4); }
+  50% { border-color: rgba(142,154,175,0.8); box-shadow: 0 0 6px rgba(142,154,175,0.3); }
+}
 
 .proxy-hint {
   display: block;
