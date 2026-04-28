@@ -1,0 +1,413 @@
+
+AI Fairness 360
+Deep Technical Analysis & Implementation Plan
+github.com/Trusted-AI/AIF360  |  IBM Research / Linux Foundation AI
+
+This document provides an exhaustive breakdown of how AIF360 detects, measures, and mitigates algorithmic bias — covering its mathematical foundations, every major algorithm, all fairness metrics, and a phased implementation plan for your project.
+
+
+1. What AIF360 Is — And Why It Works
+AIF360 is not a single debiasing algorithm. It is an extensible toolkit that treats bias mitigation as a pipeline-level problem, not a model-level tweak. The core intellectual contribution is the separation of three independent concerns:
+
+
+Every algorithm follows scikit-learn's fit/transform/predict paradigm. Datasets are first-class objects — the BinaryLabelDataset carries both feature data and protected attribute metadata — so every metric and algorithm can reason about group membership in a consistent, composable way.
+
+The key architectural insight: AIF360 doesn't modify your model. It wraps your entire pipeline — data, training procedure, or predictions — and injects fairness at the stage where you have permission and leverage to intervene.
+
+1.1 The Three Intervention Stages
+AIF360 divides the ML pipeline into three points of intervention, each with different tradeoffs:
+
+
+AIF360's recommendation: always intervene at the earliest permissible stage. Pre-processing gives the most degrees of freedom. Post-processing is the last resort.
+
+2. Fairness Metrics — The Measurement Layer
+Before any debiasing algorithm can be applied, bias must be measured. AIF360 implements 71+ fairness metrics, organized around two competing philosophical worldviews. Choosing the wrong metrics for your use case produces misleading results.
+
+2.1 The Two Worldviews
+
+Critical: These two worldviews are mathematically incompatible. You cannot simultaneously satisfy demographic parity and equalized odds in general (Chouldechova, 2017). Choosing a worldview is a product and ethics decision — not a technical one.
+
+2.2 Core Metrics — Mathematical Definitions
+Statistical Parity Difference (SPD)
+Measures the difference in positive prediction rates between unprivileged and privileged groups:
+SPD = P(Ŷ=1 | A=0) − P(Ŷ=1 | A=1)
+Ideal value: 0 (equal positive rates)
+Negative: bias toward privileged group (they receive more positive outcomes)
+Positive: bias toward unprivileged group
+Practical threshold: |SPD| < 0.1 is often considered acceptable
+
+Disparate Impact (DI)
+The ratio version of SPD — legally significant under US employment law (the "4/5 rule"):
+DI = P(Ŷ=1 | A=0) / P(Ŷ=1 | A=1)
+Ideal value: 1 (equal selection rates)
+Legal threshold: DI ≥ 0.8 required under EEOC 4/5 rule
+Note: DI < 0.8 means the unprivileged group is selected at less than 80% the rate of the privileged group
+
+Average Odds Difference (AOD)
+Captures both False Positive Rate and True Positive Rate differences simultaneously — the most comprehensive equalized odds metric:
+AOD = ½ · [(FPR_unpriv − FPR_priv) + (TPR_unpriv − TPR_priv)]
+Ideal value: 0
+When to use: WYSIWYG worldview — you care about equal accuracy across groups, not equal outcome rates
+Advantage over SPD: penalizes both type I and type II error disparities
+
+Equal Opportunity Difference (EOD)
+EOD = TPR_unpriv − TPR_priv
+Ideal value: 0
+Interpretation: checks whether truly positive instances are equally recalled across groups
+Use case: loan repayment prediction — equally likely to identify qualified borrowers across demographic groups
+
+Generalized Entropy Index (GEI)
+A unified individual and group fairness measure derived from information theory, proposed by Speicher et al. (2018):
+E(α) = 1/[nα(α-1)] · Σ[(bᵢ/μ)^α − 1]   where bᵢ = ŷᵢ − yᵢ + 1
+α parameter: controls weight given to distances at different parts of the distribution
+α=1 (Theil T): 1/n · Σ(bᵢ/μ)·ln(bᵢ/μ) — sensitive to high-benefit individuals
+α=0 (Theil L): −1/n · Σln(bᵢ/μ) — sensitive to low-benefit individuals
+Unique property: measures both individual fairness (within groups) and group fairness (between groups) simultaneously
+
+
+3. Pre-Processing Algorithms — Fix the Data
+Pre-processing algorithms intervene before model training. They are the most powerful category because they give any downstream model — regardless of architecture — a fairer data signal to learn from.
+
+3.1 Reweighing (Kamiran & Calders, 2012)
+The simplest, most interpretable, and lowest-risk algorithm. It assigns instance-level weights so that the weighted dataset is statistically fair before training. No features or labels are altered — only the training signal each sample contributes.
+
+Mathematical mechanism
+The weight for each (group, outcome) combination is:
+W(A=a, Y=y) = P_expected(A=a, Y=y) / P_observed(A=a, Y=y)
+Where P_expected is the probability if group and outcome were independent (i.e., uniform), and P_observed is the actual frequency in the training data.
+
+For a concrete example on the Adult Income dataset (Male vs Female, outcome = income >$50k):
+Privileged+Positive (Male, high income): W = [P(Male)·P(High)]/P(Male,High) < 1 → downweighted (overrepresented)
+Unprivileged+Positive (Female, high income): W = [P(Female)·P(High)]/P(Female,High) > 1 → upweighted (underrepresented)
+
+Implementation
+from aif360.algorithms.preprocessing import Reweighing
+
+rw = Reweighing(
+    unprivileged_groups=[{'gender': 0}],
+    privileged_groups=[{'gender': 1}]
+)
+rw.fit(train_dataset)
+rw_train = rw.transform(train_dataset)
+
+# Pass weights to any sklearn model
+model.fit(X_train, y_train,
+    sample_weight=rw_train.instance_weights)
+
+
+Reweighing is always the first algorithm to try. It is reversible, interpretable, and compatible with any downstream model that supports sample weighting.
+
+3.2 Disparate Impact Remover (Feldman et al., 2015)
+DIR edits continuous feature values by moving each group's feature distribution towards a common target distribution. The key mathematical property is that rank-ordering within each group is preserved — a critical fairness property for many applications.
+
+Mathematical mechanism
+For each non-protected feature f and repair level λ ∈ [0,1]:
+x_repaired = (1 − λ)·x_original + λ·Q_target(F_group(x_original))
+Where F_group is the empirical CDF of feature f within the group, and Q_target is the quantile function of the target distribution (typically the marginal distribution across all groups). The repair maps each point to its equivalent quantile in the target distribution.
+
+λ = 0: no repair (original data)
+λ = 1: full repair (group distributions become identical)
+λ = 0.8: recommended starting point — balances fairness and predictive accuracy
+
+Implementation
+from aif360.algorithms.preprocessing import DisparateImpactRemover
+
+dir_algo = DisparateImpactRemover(
+    repair_level=0.8,          # Tune this: 0=none, 1=full
+    sensitive_attribute='gender'
+)
+dir_train = dir_algo.fit_transform(train_dataset)
+dir_test  = dir_algo.transform(test_dataset)
+
+Warning: In order to transform test data correctly, the distributions of features conditioned on the protected attribute must be the same as in training data. Distribution shift at test time breaks the repair.
+
+3.3 Learning Fair Representations (Zemel et al., 2013)
+LFR is the most mathematically ambitious pre-processing algorithm. It learns a latent space with k prototype vectors that encodes the input data well but provably removes protected attribute information. All downstream models then train on this new k-dimensional representation.
+
+Mathematical mechanism
+LFR minimizes a composite loss function with three terms:
+L_total = Ax · L_reconstruction + Ay · L_prediction + Az · L_fairness
+
+L_reconstruction (Ax): How well the k prototypes reconstruct the original input features. Controls information preservation.
+L_prediction (Ay): How well the prototype weights predict the target label Y. Controls predictive utility.
+L_fairness (Az): KL divergence between the distribution of prototype assignments for privileged vs unprivileged groups. Forces groups to have identical distributions in latent space.
+
+The k prototype vectors are learned jointly. Each input maps to a probability distribution over k prototypes (via softmax distance). The output representation is this k-dimensional probability vector — NOT the original features.
+
+Implementation
+from aif360.algorithms.preprocessing import LFR
+
+lfr = LFR(
+    unprivileged_groups=[{'gender': 0}],
+    privileged_groups=[{'gender': 1}],
+    k=5,     # Number of prototype vectors — tune via cross-validation
+    Ax=0.01, # Input reconstruction weight
+    Ay=1.0,  # Prediction accuracy weight
+    Az=50.0  # Fairness constraint weight — key parameter
+)
+lfr.fit(train_dataset)
+lfr_train = lfr.transform(train_dataset)
+# Note: lfr_train.features is now k-dimensional, not original features
+
+Critical limitation: LFR's output is in a latent space, not the original feature space. This means feature interpretability is lost — a significant problem for regulated industries requiring model explainability. Use DIR or Reweighing if human-interpretable features are required.
+
+4. In-Processing Algorithms — Fix the Learner
+In-processing algorithms embed fairness constraints directly into the training objective. They require access to the model training code but can achieve fairness that pre-processing cannot, because they constrain what patterns the model learns from the data.
+
+4.1 Adversarial Debiasing (Zhang et al., 2018)
+The most powerful and architecturally elegant in-processing algorithm. Two neural networks compete in a minimax game: a predictor trying to accurately predict Y, and an adversary trying to infer the protected attribute A from the predictor's outputs.
+
+Mathematical mechanism
+The training objective is a minimax game:
+min_P max_A [ L_predictor(Y, Ŷ) − λ · L_adversary(A, Â(Ŷ)) ]
+
+The predictor minimizes prediction loss while maximizing the adversary's difficulty in recovering A from Ŷ. The adversary maximizes its ability to infer A from Ŷ. At Nash equilibrium, Ŷ carries no group-discriminating information.
+
+λ controls the fairness-accuracy tradeoff: higher λ = harder fairness enforcement, greater accuracy cost
+Adversary input: the predictor's output (scores or logits) — NOT the original features
+Fairness target: when adversary cannot predict A better than chance, equalized odds is achieved
+
+Implementation
+import tensorflow.compat.v1 as tf
+from aif360.algorithms.inprocessing import AdversarialDebiasing
+
+sess = tf.Session()
+adv = AdversarialDebiasing(
+    privileged_groups=[{'gender': 1}],
+    unprivileged_groups=[{'gender': 0}],
+    scope_name='debiased_classifier',
+    debias=True,            # Set False to train without fairness for baseline
+    adversary_loss_weight=0.1,  # λ — start low, tune upward
+    num_epochs=50,
+    sess=sess
+)
+adv.fit(train_dataset)
+predictions = adv.predict(test_dataset)
+
+Adversarial Debiasing requires TensorFlow 1.x (tensorflow-compat v1 API). It is computationally expensive — expect 3-10x longer training than a standard classifier. Best suited for neural network models where the added complexity is justified.
+
+4.2 Prejudice Remover Regularizer (Kamishima et al., 2012)
+Adds a fairness-aware regularization term to the learning algorithm's objective function. Simpler than adversarial debiasing and limited to models that support custom regularization terms (e.g., logistic regression).
+L_total = L_log(Y, Ŷ) + η · R_fairness(A, Ŷ)
+R_fairness is mutual information between the protected attribute A and the prediction Ŷ. Minimizing mutual information forces the model to make predictions that are statistically independent of A.
+
+4.3 Exponentiated Gradient & Grid Search Reduction
+These algorithms from Agarwal et al. (2018/2019) reduce the fairness-constrained ML problem to a sequence of standard weighted classification problems — making them compatible with any sklearn estimator.
+
+Exponentiated Gradient: Iteratively reweights the training distribution, solving a sequence of standard ML problems, each pushing toward satisfying the fairness constraint. Converges to a randomized classifier satisfying the constraint.
+Grid Search: Exhaustively searches over a grid of Lagrange multipliers for the fairness constraint. More thorough than Exponentiated Gradient but more computationally expensive. Better for finding the Pareto-optimal frontier of accuracy vs fairness.
+
+Implementation (Exponentiated Gradient)
+from aif360.algorithms.inprocessing import ExponentiatedGradientReduction
+from sklearn.linear_model import LogisticRegression
+
+estimator = LogisticRegression()
+egr = ExponentiatedGradientReduction(
+    estimator=estimator,
+    constraints='EqualizedOdds',  # or 'DemographicParity'
+    eps=0.01     # Fairness violation tolerance
+)
+egr.fit(train_dataset)
+
+5. Post-Processing Algorithms — Fix the Outputs
+Post-processing algorithms adjust predictions after a model has been trained. They are the only option when the model is a black box (e.g., a third-party API or legacy system). They require protected attribute information at inference time — which has legal implications.
+
+5.1 Equalized Odds Post-Processing (Hardt et al., 2016)
+Adjusts model score thresholds independently per group to equalize TPR and FPR across groups simultaneously. Solved as a linear program on each group's ROC curve.
+
+Mathematical mechanism
+Find per-group decision rules (p0, p1) — probabilities of predicting positive — that solve:
+min Σ_g L(p0_g, p1_g)  s.t.  TPR_unpriv = TPR_priv  ∧  FPR_unpriv = FPR_priv
+The solution maps each group's score distribution to the minimum-cost randomized threshold rule that achieves equalized odds. Note: the solution is randomized (non-deterministic per individual) because the LP optimum lies at the intersection of ROC curves.
+
+Implementation
+from aif360.algorithms.postprocessing import EqOddsPostprocessing
+
+# Train on a held-out calibration set, not the test set
+eop = EqOddsPostprocessing(
+    privileged_groups=[{'gender': 1}],
+    unprivileged_groups=[{'gender': 0}],
+    seed=42
+)
+# val_dataset and val_predictions must be separate from test data
+eop.fit(val_dataset, val_predictions)
+fair_predictions = eop.predict(test_predictions)
+
+Legal note: Equalized Odds Post-Processing requires knowing the protected attribute at prediction time. In many jurisdictions (EU AI Act, US EEOC), using protected attributes in model decisions — even to correct bias — is legally restricted. Verify with your legal team.
+
+5.2 Reject Option Classification (Kamiran et al., 2012)
+The only deterministic post-processing algorithm. It identifies predictions near the decision boundary (the critical region) and flips them: unprivileged group near-boundary predictions are pushed toward favorable outcomes; privileged group near-boundary predictions toward unfavorable outcomes.
+If |score − threshold| < θ: flip to favor unprivileged / penalize privileged
+
+θ (critical region width): wider = more aggressive correction, higher accuracy cost. Tune via cross-validation.
+Deterministic: same input always produces same output — important for individual consistency
+Rationale: predictions near the boundary carry the highest uncertainty; flipping them for the disadvantaged group is both fair and defensible
+
+Implementation
+from aif360.algorithms.postprocessing import RejectOptionClassification
+
+roc_algo = RejectOptionClassification(
+    unprivileged_groups=[{'gender': 0}],
+    privileged_groups=[{'gender': 1}],
+    low_class_thresh=0.01,
+    high_class_thresh=0.99,
+    num_class_thresh=100,
+    num_ROC_margin=50,
+    metric_name='Statistical parity difference',
+    metric_ub=0.05,
+    metric_lb=-0.05
+)
+roc_algo.fit(val_dataset, val_predictions)
+fair_predictions = roc_algo.predict(test_predictions)
+
+6. Implementation Plan for Your Project
+A structured five-phase approach to integrating AIF360 into your project, from initial audit through ongoing production monitoring.
+
+Phase 1: Audit & Baseline (Weeks 1–2)
+Step 1 — Install and set up AIF360
+pip install 'aif360[all]'           # Full install with all algorithm dependencies
+# Or selectively:
+pip install 'aif360[LFR,OptimPreproc]'
+pip install 'aif360[AdversarialDebiasing]'  # Requires TensorFlow
+Step 2 — Identify protected attributes
+List every column that could act as a proxy for a protected attribute:
+Direct: race, gender, age, religion, national origin, disability status
+Proxy: zip code, school attended, surname, device type, income bracket, credit history
+Proxy detection: compute pairwise correlations between all features and protected attributes. Features with |r| > 0.3 are potential proxies.
+Step 3 — Wrap data in AIF360 dataset objects
+from aif360.datasets import BinaryLabelDataset
+from aif360.metrics import BinaryLabelDatasetMetric, ClassificationMetric
+
+train_ds = BinaryLabelDataset(
+    df=train_df,
+    label_names=['outcome'],              # Target column
+    protected_attribute_names=['gender', 'race'],  # All protected attrs
+    favorable_label=1,
+    unfavorable_label=0
+)
+Step 4 — Establish fairness baseline
+metric = BinaryLabelDatasetMetric(
+    train_ds,
+    unprivileged_groups=[{'gender': 0, 'race': 0}],
+    privileged_groups=[{'gender': 1, 'race': 1}]
+)
+print('Disparate Impact:        ', metric.disparate_impact())
+print('Stat. Parity Difference: ', metric.statistical_parity_difference())
+# Target: DI close to 1.0, SPD close to 0.0
+
+Phase 2: Pre-Processing Interventions (Weeks 2–3)
+Apply algorithms in order of increasing aggressiveness. Start with Reweighing; escalate only if needed.
+
+
+Phase 3: In-Processing Interventions (Weeks 3–5, if needed)
+Use in-processing algorithms when pre-processing alone is insufficient, or when the bias arises from complex feature interactions that data-level interventions cannot address.
+
+Neural network models: Use Adversarial Debiasing. Budget 3-5x normal training time.
+sklearn models: Use Exponentiated Gradient Reduction. Compatible with any sklearn estimator.
+Logistic regression: Prejudice Remover is the simplest — just adds a regularization term.
+When you need to guarantee a fairness constraint: Grid Search Reduction (exhaustive but expensive).
+
+Phase 4: Post-Processing (Weeks 4–5, for black-box models)
+Apply post-processing when you cannot modify the model (legacy systems, vendor APIs, externally trained models).
+
+If protected attribute is available at inference time: Use Equalized Odds Post-Processing for maximum fairness gain.
+If determinism is required (same input = same output): Use Reject Option Classification.
+If only output scores are available: Both post-processing algorithms work on raw scores.
+Always train post-processing transforms on a held-out calibration set — never on the test set. Using test data to fit the post-processor inflates fairness metrics without real improvement.
+
+Phase 5: Continuous Monitoring & MLOps (Ongoing)
+Fairness regression tests
+Treat fairness metrics exactly like accuracy metrics in your CI/CD pipeline:
+# Example alert thresholds
+THRESHOLDS = {
+    'disparate_impact': (0.8, 1.2),    # Outside range = alert
+    'stat_parity_diff': (-0.1, 0.1),   # |SPD| > 0.1 = warning
+    'avg_odds_diff':    (-0.05, 0.05),  # |AOD| > 0.05 = audit trigger
+}
+
+Compute all fairness metrics on every model version. Fail the build if any metric degrades beyond threshold.
+Re-run Reweighing weight computation on every training data refresh. Weights go stale as data distributions shift.
+Track fairness metrics over time in your model registry alongside accuracy metrics.
+AIF360's mlops/ directory contains Docker and Kubernetes configs for serving fairness metrics in production pipelines.
+
+Algorithm selection decision tree
+
+7. Critical Pitfalls & Tradeoffs
+7.1 The Impossibility of Simultaneous Fairness Criteria
+Chouldechova (2017) and Kleinberg et al. (2017) independently proved that in general, you cannot simultaneously satisfy:
+Calibration (within groups): predicted scores reflect true probabilities within each group
+Equalized odds: equal TPR and FPR across groups
+Demographic parity: equal positive prediction rates across groups
+
+This is not a limitation of AIF360— it is a mathematical impossibility. Choosing which fairness criterion to optimize is a value judgment that must be made explicitly and documented for stakeholders.
+
+7.2 Proxy Feature Problem
+Removing the protected attribute column does not remove bias if proxy features carry the same information. Examples:
+Removing 'race' but keeping zip code (racial residential segregation means zip ≈ race in many US cities)
+Removing 'gender' but keeping names (surname and first name are strong gender predictors)
+Removing 'age' but keeping 'years of experience' and 'graduation year'
+
+AIF360's metrics will not detect proxy discrimination automatically. You must:
+Compute mutual information between each feature and each protected attribute
+Test fairness metrics separately for each potential proxy
+Consider dropping or further transforming high-proxy features
+
+7.3 Accuracy-Fairness Tradeoff
+Every algorithm in AIF360 reduces accuracy to some degree. The typical observed tradeoffs:
+
+In high-stakes domains (credit, medical, criminal justice), document the accuracy-fairness tradeoff explicitly in your model card. The business case for fairness must be made alongside the quantified accuracy impact.
+
+7.4 Legal Considerations
+Several AIF360 algorithms require protected attribute information at prediction time. Check jurisdiction-specific rules:
+EU AI Act (2024): Requires documentation of bias testing and mitigation for high-risk AI systems. AIF360 metrics provide the evidence trail.
+US EEOC 4/5 Rule: Disparate Impact ratio < 0.8 triggers adverse impact review. DI metric maps directly to this standard.
+GDPR Article 22: Automated decision-making must not discriminate on protected grounds. Post-processing that uses protected attributes to flip decisions may fall into a legal gray area.
+Fair Housing Act / ECOA: Credit and housing models face strict scrutiny. Reweighing and DIR are preferred because they operate on training data, not on individual protected attributes at inference time.
+
+AI Fairness 360 — Technical Deep Dive
+github.com/Trusted-AI/AIF360  |  Apache 2.0 License  |  IBM Research
+Concern | AIF360 Component | Key Insight
+Measurement | 71+ fairness metrics | Different definitions of fairness are mathematically incompatible — you must choose deliberately
+Intervention | 15 bias mitigation algorithms | Bias can be attacked at data, training, or prediction stage — earlier = more corrective power
+Worldview | WAE vs WYSIWYG framing | Your metric choice encodes a philosophical claim about why group differences exist
+Stage | When to Use | What Changes | Access Required
+Pre-processing | You own the training data pipeline | Features, labels, or sample weights before training | Full data access
+In-processing | You own the training code | The learning objective or model architecture during training | Model training code
+Post-processing | You have a fixed black-box model | Decision thresholds applied to model outputs | Model predictions only
+Worldview | Assumption | Metrics to Use | Typical Use Cases
+WAE — We're All Equal | Any observed outcome difference between groups is due to discrimination, not real group differences | Statistical Parity Difference, Disparate Impact | Hiring, lending, college admissions
+WYSIWYG — What You See Is What You Get | Observed feature differences reflect real underlying differences; model should be equally accurate across groups | Average Odds Difference, Equal Opportunity Difference | Criminal risk scoring, medical triage
+Metric | Formula | Ideal | Worldview
+Statistical Parity Difference | P(Ŷ=1|A=0) − P(Ŷ=1|A=1) | 0 | WAE
+Disparate Impact | P(Ŷ=1|A=0) / P(Ŷ=1|A=1) | 1 | WAE
+Average Odds Difference | ½·[(ΔFPR)+(ΔTPR)] | 0 | WYSIWYG
+Equal Opportunity Difference | TPR_unpriv − TPR_priv | 0 | WYSIWYG
+Theil Index | E(α=1) | 0 | Both
+Generalized Entropy Index | E(α) as defined above | 0 | Both
+Property | Value
+Target metric | Statistical Parity Difference → 0, Disparate Impact → 1
+Constraint | Downstream model must accept sample_weight in fit()
+Feature/label changes | None — only weights are modified
+Best for | Compliance contexts where data values cannot be altered
+Fairness gain | High for group fairness, moderate for equalized odds
+Accuracy cost | Very low (5-15% typical)
+Algorithm | When to Try It | Expected Fairness Gain | Accuracy Cost
+Reweighing | Always — first algorithm to try | High for SPD/DI | Very low (5-15%)
+Disparate Impact Remover | If Reweighing insufficient; continuous features | High for DI | Moderate (10-25%)
+Optimized Preprocessing | Complex multi-constraint scenarios | Very high | Moderate (15-30%)
+Learning Fair Representations | Deep debiasing; latent space acceptable | Very high | High (20-40%)
+Condition | Recommended Algorithm
+Can modify training data AND features/labels cannot change | Reweighing
+Can modify training data AND features can be edited | Disparate Impact Remover (λ=0.8)
+Need latent-space deep debiasing | Learning Fair Representations
+Have neural network training access | Adversarial Debiasing
+Have sklearn model training access | Exponentiated Gradient Reduction
+Model is a black box; need determinism | Reject Option Classification
+Model is a black box; max fairness gain needed | Equalized Odds Post-Processing
+Algorithm | Fairness Gain | Typical Accuracy Drop | Notes
+Reweighing | High (SPD/DI) | 5-15% | Depends on class imbalance severity
+DIR (λ=0.8) | High (DI) | 10-25% | Worse for highly predictive protected features
+LFR | Very high | 20-40% | Latent space loses informative signal
+Adversarial Debiasing | Very high | 15-35% | Highly tunable via λ
+Equalized Odds PP | High (equalized odds) | 10-20% | Randomization adds noise
+Reject Option Class. | Moderate | 5-15% | Only near-boundary predictions affected

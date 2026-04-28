@@ -1,0 +1,20 @@
+{
+  "job": {
+    "positive": [],
+    "negative": []
+  },
+  "college": {
+    "positive": [
+      "Prior Education: GED"
+    ],
+    "negative": [
+      "Race: Hispanic",
+      "Household Income",
+      "First-Generation Student"
+    ]
+  },
+  "loan": {
+    "positive": [],
+    "negative": []
+  }
+}

@@ -1,0 +1,266 @@
+💰  Financial Triage Environment
+Comprehensive Project Documentation
+indra-dhanush / financial-triage-env  ·  HuggingFace Spaces (OpenEnv)
+SDK: Docker  ·  License: MIT  ·  Status: Running
+
+ 
+1.  Executive Summary
+Financial Triage Environment is an Indian-household-finance simulation built on the OpenEnv framework. The agent — an LLM or any policy — manages a rupee-denominated household ledger for 30 to 90 simulated days. Each step represents one day: the agent decides what to pay, what to defer, which loan to refuse, and whether to build or drain its savings. The environment returns a dense per-step scalar reward and a single deterministic grade in [0, 1] at the episode's close.
+The project was developed for the Meta OpenEnv × Scaler School of Technology hackathon. It targets two competition tracks: long-horizon planning (30/60/90-day interest-and-bill compounding) and economic/world modelling (stochastic paydays, partial-observability between loan labels and APRs, mechanical overdraft and default).
+All amounts are denominated in Indian Rupees (₹ / INR). APRs, Diwali magnitudes, informal-loan rates, and UPI spend distributions are calibrated against published Indian-finance statistics cited in tasks.py — not fit to any real household panel.
+ 
+2.  Core Concept & Motivation
+2.1  The Problem
+Most Indians learn household finance by getting it wrong: a missed EMI, a recharge late enough to disconnect a SIM, a Diwali loan that looked small on the offer screen. Traditional financial-literacy tools use static charts and do not let a learner (or a language model) feel the compounding consequences of daily decisions.
+2.2  The Solution
+Financial Triage makes an LLM play the month — feel paydays, interest bleed, UPI micro-spend, and the 1 a.m. instant-cash pitch — and then judges how the books look at the end. State transitions are deterministic Python code (server/my_env_environment.py), not prompt-based vibes. The grader (tasks.py) is rule-based and reproducible: the same seed always produces the same result.
+2.3  OpenEnv Fit
+The submission conforms to the OpenEnv HTTP contract: POST /reset, POST /step, GET /state, GET /metadata, GET /schema, GET /health, and GET /mcp are all live on the Space. AutoEnv.from_hub() works with OPENENV_TRUST_REMOTE_CODE=1.
+ 
+3.  Repository Structure
+The repository is hosted at https://huggingface.co/spaces/indra-dhanush/financial-triage-env (mirrored at https://github.com/indra-2007/financial-triage-env).
+ 
+ 
+4.  Environment Design
+4.1  The Daily Loop
+Every step is one simulated day. The OpenEnv lifecycle is:
+reset(task_id) — returns the opening ledger (observation dict)
+step(action) — advances the clock by one day: paydays land, UPI spends fire, interest accrues, bills come due, shocks roll their dice, reward breakdown is computed, next observation is returned
+grade_episode — when the horizon closes, the grader reads the full history and returns a single float in [0, 1]
+ 
+4.2  Observation
+The observation returned after each step is a structured ledger containing:
+Account balances: checking, savings
+Active bills with due dates and amounts
+Outstanding debts with APR, remaining principal, and next EMI
+Risk signals: days to overdraft, interest accruing today, credit score, late-fee risk
+Optional loan offers (formal, informal, festive)
+Active medical emergency details (if any)
+Festival metadata (if Diwali window is active)
+Short human-readable daily_summary string
+The informal-lender quote in the observation advertises a per-day rate that hides a 240–365% APR. The agent can see the actual APR if it looks.
+ 
+4.3  Action Space (11 Templates)
+ 
+Pydantic validators in models.py reject malformed calls before the environment processes them.
+ 
+4.4  Reward Function (14 Additive Terms)
+_compute_reward in server/my_env_environment.py returns a dense scalar reward each step as the sum of 14 additive components:
+ 
+The reward is different from the episode grade. grade_episode in tasks.py applies difficulty-specific weights across a separate set of outcome dimensions (overdraft count, on-time bill rate, credit trajectory, savings level, interest paid, defaults, loan hygiene, emergency survival, temptation resistance) and is reserved for the bar-chart metric and the /score endpoint. GRPO optimises against the dense per-step breakdown total, keeping the two signals distinct.
+ 
+5.  Task Difficulties
+ 
+Task configs and per-difficulty grade_* functions all live in tasks.py. Data is calibrated against:
+RBI Financial Literacy Survey 2024: 27% adult literacy rate
+NSSO health expenditure: mean OOP ₹1,69,504 for private hospitalisation
+RBI: credit-card outstanding ₹2,70,000 crore (June 2024)
+Average household debt service ratio: 25.7% of disposable income
+ 
+6.  Stochasticity & Reproducibility
+All random elements are seeded, so every number in the README is reproducible on a laptop. Key stochastic mechanisms:
+Bill amounts jitter ± 15% around their base value each cycle
+UPI micro-spend fires with a per-day probability and draws from a configured amount range
+Medical emergency timing is drawn from the task config's shock schedule
+Informal-lender APR is partially observable — the daily-rate label in the observation undersells the annualised figure
+The stochasticity audit script (scripts/verify_stochasticity.py) shows ₹3,288 std in day-10 checking balance on medium across 30 seeds, while σ(score) = 0 — the state evolves stochastically but the event-driven grader maps to the same grade at this configuration. For seed-level comparison the dense per-step return (which GRPO optimises) has real variance. Full results are committed as stochasticity_report.json.
+ 
+7.  Training Pipeline
+7.1  Stage 1 — Supervised Fine-Tuning (SFT)
+SFT is behavioural cloning on heuristic rollouts stored in sft_dataset.jsonl (629 kB, ~750 episodes across all three difficulties). The objective is not to teach a good policy but to teach the action grammar and a sane opening repertoire so the GRPO parser never needs to fail-safe.
+Base model: Qwen2.5-7B-Instruct (4-bit Unsloth quantisation)
+Training: 60 steps; log-loss drops from 2.25 to 0.12 on the heuristic-rollout dataset
+Checkpoints: LoRA adapters saved locally; merge with Unsloth for single-file export
+SFT result: recovers 86% (medium) to 95% (hard) of heuristic episode grade from text alone
+ 
+7.2  Stage 2 — GRPO (Group Relative Policy Optimisation)
+GRPO runs in TRL on the Unsloth-quantised Qwen2.5-7B-Instruct model. The reward signal is the live environment, not a separate judge model.
+Per-row mechanics:
+Each GRPO row carries a stored prefix of expert (heuristic) actions for a specific (task_id, seed, day) tuple
+The trainer deterministically replays that prefix to reconstruct the exact day-d observation
+The model emits one action string; the parser strictly accepts or rejects it (no heuristic fallback)
+One env.step() runs; the optimizer sees _last_breakdown['total'] as the scalar reward
+The end-of-episode bonus is folded into the last-day reward so the model sees the grader's tail
+grade_episode is not called inside GRPO — it is reserved for the bar-chart metric and the Space's /score endpoint, keeping the two signals distinct. Reward-invariant unit tests in tests/test_reward_properties.py check: on-time beats do-nothing, overdraft fires at −25, do-nothing streak triggers the inaction term, same-day withdraw-redeposit earns no savings credit, grade ∈ (0,1) on every difficulty.
+ 
+7.3  Training Results (7B Model, Single-Pass n = 5)
+ 
+Full hyperparameters and per-step scalar metrics are preserved in TRAINING_LOGS/training_run.json. Both training scripts set report_to='wandb' when WANDB_API_KEY is present, so re-runners get the full per-step W&B log without the author's key in the loop.
+ 
+8.  Multi-Seed Baselines (n = 60 Seeds)
+Produced by scripts/eval_heuristic.py with n = 60 seeds per (policy, task) and a percentile bootstrap on the mean. Raw per-seed scores are in heuristic_scores.json.
+ 
+Key findings: Easy is near-solved by the heuristic. Medium shows a clean ordering heuristic ≫ random ≫ do_nothing. On Hard, the heuristic only edges random_valid by Δ ≈ 0.002 at n = 60 — this is intentional. It keeps the environment genuinely hard for the SFT → GRPO loop and gives the model real room to beat the teacher. greedy_apr (the conventional personal-finance advice) drops below do_nothing on medium and hard because paying the highest-APR debt first drains checking ahead of bills and medical shocks.
+ 
+9.  Environment Ablation: The Mechanics Actually Bind
+Same heuristic, same n = 40 seeds, one configured mechanic nulled out per run on the hard task. Positive Δ means the mechanic is binding — the score rises when it is removed. Bars are sorted by effect size with 95% paired bootstrap CI over matched seeds.
+ 
+On medium, only one mechanic binds: no_interest_accrual lifts the grade from 0.694 → 0.818 (+0.124). The other four ablations leave medium grade unchanged within 0.01. This is the mechanical answer to 'why is the rule-based teacher capped on medium?' — the APR stack is doing the work, not the grader.
+ 
+10.  Interactive Demo UI (/demo/)
+OpenEnv's default POST /reset and POST /step create a new environment per HTTP call (correct for stateless RL clients) but unhelpful for a live walkthrough. server/video_demo_server.py mounts a lock-protected session API and static UI on the same Space:
+ 
+Live URL: https://indra-dhanush-financial-triage-env.hf.space/demo/
+Local: python -m server.video_demo_server → http://127.0.0.1:8088/
+Render (free tier, sleeps on idle): one-click render.yaml Blueprint. Vercel-style serverless is not compatible because the session must live in one process.
+ 
+11.  Technology Stack
+ 
+12.  How to Run (Re-run Every Number)
+12.1  Local Setup
+git clone https://huggingface.co/spaces/indra-dhanush/financial-triage-env
+cd financial-triage-env && pip install -e .
+ 
+12.2  Serve the Environment
+uvicorn server.app:app --host 0.0.0.0 --port 7860          # OpenEnv API
+python -m server.video_demo_server                         # /demo/ UI (port 8088)
+ 
+12.3  Evaluation Scripts
+ 
+12.4  Raw HTTP (No Client Library)
+import requests
+BASE = 'https://indra-dhanush-financial-triage-env.hf.space'
+obs = requests.post(f'{BASE}/reset', json={'task_id': 'hard', 'seed': 0}).json()
+# obs['observation'] is the full ledger. POST the next action to /step.
+ 
+13.  Hackathon Rubric Map
+Track fit: #2 Long-horizon planning (30/60/90-day arcs) and #3.1 Economic/world modelling (stochastic paydays, partial observability, mechanical default and overdraft). Multi-agent (#1) and self-spawning curricula (#4) are explicitly out of scope.
+ 
+14.  Honest Caveats
+On hard, the heuristic only edges random_valid by Δ ≈ 0.002 at n = 60. The rule-based teacher is not optimal — this is a feature, not a bug. The per-seed scatter in paired_scores_hard.png shows the win/loss split directly rather than hiding it in the mean.
+On easy and medium, rounded grades flatten across seeds. The env is not deterministic — the stochasticity audit confirms state evolves (σ(checking) = ₹3,288 on medium at day 10) but the event-driven grader maps to the same grade at this configuration.
+APRs, Diwali magnitudes, and UPI leak rates are calibrated from published Indian-finance statistics cited in tasks.py. They are not fit to any real household panel.
+The grader is a design object, not an econometric estimate.
+The environment is a decision-making study. It does not hand out financial advice and should not be treated as a product.
+Planned next steps: seed-matched model-minus-heuristic plot once new GRPO checkpoints land; sampled (rather than hard-coded) emergency timing and informal-loan APRs; LoRA adapters pushed as a separate Model Hub repo.
+ 
+15.  Key Links & Resources
+ 
+
+Financial Triage Environment  ·  MIT License  ·  indra-dhanush / indra-2007
+Any macroeconomic statistic cited in prose is narrative context, not a calibration target.
+Path / File | Purpose
+server/my_env_environment.py | Core Environment subclass: step(), reset(), _compute_reward(), 14-term reward breakdown
+server/app.py | FastAPI create_app(); mounts OpenEnv routes + schemas
+server/video_demo_server.py | Lock-protected session server; mounts /demo/ UI + /api/demo/* endpoints
+tasks.py | Task configs (EASY / MEDIUM / HARD) and grade_easy / grade_medium / grade_hard graders
+models.py | Pydantic action & observation schemas; validator rejects malformed calls before env sees them
+inference.py | Inference helper for merged / LoRA checkpoints; smoke-tests decode after merge
+training_notebook.py | Standalone training script (mirrors the Colab notebook)
+financial_triage_training.ipynb | Committed Colab notebook (SFT then GRPO) with saved outputs
+scripts/train_sft.py | Supervised Fine-Tuning (SFT) standalone script
+scripts/train_grpo.py | GRPO standalone script (TRL + Unsloth)
+scripts/eval_heuristic.py | Four-policy multi-seed evaluation (n = 60 seeds per task)
+scripts/ablation_env.py | Six-mechanic ablation study (n = 40 seeds)
+scripts/inspect_reward.py | Fire any of the 14 reward terms on a chosen (task, seed, day, action)
+scripts/verify_stochasticity.py | Env-vs-grader stochasticity audit
+scripts/check_openenv.py | 15-check OpenEnv HTTP compliance smoke test
+scripts/regenerate_figures.py | Re-plot all README figures from committed JSON
+scripts/paired_scores.py | Per-seed hard-task scatter + delta histogram
+tests/test_reward_properties.py | Reward-invariant unit tests
+sft_dataset.jsonl | SFT dataset: heuristic rollouts (629 kB JSONL)
+heuristic_scores.json | Raw per-seed scores from 4-policy multi-seed evaluation
+ablation_env.json | Full per-task numbers from the six-ablation study
+stochasticity_report.json | State σ vs grader σ audit results
+TRAINING_LOGS/ | SFT loss curve, before/after bar chart, training_run.json with hyperparameters
+video_demo/index.html | Static UI served at /demo/
+openenv.yaml | OpenEnv manifest: tasks, port, app entry-point
+Dockerfile | Container build (Python 3.11, port 7860)
+render.yaml / Procfile | Render Blueprint for free-tier video-demo hosting
+pyproject.toml / requirements.txt | Project manifest; pinned dependencies
+MINI_BLOG.md | Hackathon write-up / narrative blog post
+README.md | Judge-facing 5-minute read: rubric map, results tables, re-run commands
+Action | Description
+pay_bill_full | Pay a specific bill in full (arg: bill id, e.g. rent)
+pay_minimum | Pay only the minimum due on a debt
+defer_bill | Skip this bill cycle (incurs late-fee risk and credit score penalty)
+pay_extra_debt | Pay extra principal on a debt (reduces APR drag faster)
+transfer_to_savings | Move funds from checking to savings
+withdraw_emergency | Draw from savings to checking
+do_nothing | No financial action taken this day
+take_formal_loan | Accept a bank / NBFC loan offer
+take_informal_loan | Accept the informal (moneylender) offer — high APR
+take_festive_loan | Accept a festival-season loan offer
+negotiate_bill | Attempt to negotiate a bill extension or waiver
+Sign | Term | Behaviour
++ | on_time_bill_pay | Bonus for paying a bill before its due date
++ | apr_weighted_debt_service | Reward proportional to APR of debt being serviced (prioritise expensive debt)
++ | credit_score_delta | Reward for improving credit score
++ | savings_growth | Reward for net savings increase — gated against same-day withdraw-and-redeposit churn
++ | liquidity_buffer_bonus | Bonus for maintaining checking balance above a safety threshold
++ | emergency_buffer_bonus | Extra reward for surviving a medical emergency without defaulting
++ | action_diversity_bonus | 7-day rolling bonus for using diverse action types
+− | late_payment | Penalty for missing a bill due date
+− | overdraft | Fixed −25 penalty per overdraft event
+− | interest_bleed | Penalty proportional to interest accrued this day
+− | default | Large one-time penalty for defaulting on a debt
+− | zero_savings_penalty | Penalty for emptying savings entirely
+− | predatory_loan_carry | Ongoing penalty for holding an informal / high-APR loan
+− | inaction_streak | Penalty for three or more consecutive do_nothing actions
+Difficulty | Duration | Profile | Active Mechanics | Grade Focus
+Easy | 30 days | Fresh graduate, ₹30 k/month salary, ₹50 k checking, 3 bills, no debt | Basic UPI micro-spend (₹100–400/day, 60% probability); categories: chai, auto, Swiggy, Zepto | On-time rent, electricity, mobile recharge
+Medium | 60 days | Mid-career; salary + freelance income, 3 live debts (42% APR credit card, SBI personal-loan EMI, BNPL), informal-loan pitch at 240% APR | Medical emergency (mid-episode); UPI drain; APR-weighted debt stack; predatory-loan temptation | Minimise interest while servicing debts; survive the medical shock
+Hard | 90 days | Post-job-loss household; gig income only; 4 debts totalling ₹7.3 lakh, 2 medical shocks, Diwali week, 365% APR moneylender | All medium mechanics + festive-season spending pressure; rent hike mid-episode; UPI social pressure | Survive without destroying credit; resist predatory loans; pay priority bills
+Policy | Easy | Medium | Hard
+Heuristic (rule-based teacher) | 0.999 | 0.694 | 0.423
+SFT only (Qwen2.5-7B + LoRA) | 0.985 | 0.597 | 0.402
+SFT + GRPO (Qwen2.5-7B + LoRA) | 0.999 | 0.692 | 0.415
+SFT recovery vs heuristic | ~99% | ~86% | ~95%
+GRPO gain over SFT (pp) | +1.4 | +9.5 | +1.3
+Policy | Easy | Medium | Hard (95% CI)
+heuristic — hand-coded rule; SFT data source; Fill-baseline button in demo | 0.999 | 0.694 | 0.423  [0.417, 0.428]
+greedy_apr — clear the highest-APR debt first (textbook advice) | 0.999 | 0.223 | 0.294  [0.293, 0.295]
+random_valid — uniform over do-nothing, pay-bill, pay-minimum | 0.933 | 0.496 | 0.421  [0.419, 0.423]
+do_nothing — skip every day (null baseline) | 0.578 | 0.295 | 0.316  [0.316, 0.317]
+Ablation (Hard Task) | Mean Score | Δ vs Full (paired) | Interpretation
+full — shipping environment | 0.421 | — | Baseline
+no_medical_emergency | 0.594 | +0.172 | Medical shocks are the single largest binding constraint
+no_interest_accrual | 0.501 | +0.080 | APR on four-debt stack is second largest drag
+no_upi_micro_spend | 0.483 | +0.061 | UPI leaks are a consistent lower-magnitude drag
+no_peer_pressure | 0.446 | +0.024 | P2P pings are smaller but distinguishable from noise
+no_festival | 0.444 | +0.023 | Festive-week pressure similarly small but real
+Endpoint | Purpose
+/ | JSON status for API clients; browsers are 302-redirected to /demo/
+/demo/ | Interactive UI with Reset, Step, Fill-baseline, live reward, and final grade display
+/api/demo/reset | Session reset; creates a fresh environment for the selected task and seed
+/api/demo/step | Advance one day; returns updated observation and reward breakdown
+/api/demo/heuristic | Fill the action input with the heuristic-policy action for this observation
+/api/demo/score | Return the current episode grade
+/docs | Live OpenAPI / Swagger documentation on the Space
+/health | Health probe
+/mcp | OpenEnv MCP endpoint
+Layer | Component | Version / Notes
+Environment framework | openenv-core | ≥ 0.2.3
+API server | FastAPI + Uvicorn | Pinned in pyproject.toml / requirements.txt
+Containerisation | Docker (Python 3.11) | Port 7860; hosted on HuggingFace Spaces
+Data validation | Pydantic v2 | Action and observation schemas in models.py
+Training — base model | Qwen2.5-7B-Instruct | 4-bit quantised via Unsloth
+Training — SFT | TRL SFTTrainer | Behavioural cloning on sft_dataset.jsonl
+Training — RL | TRL GRPOTrainer | Dense env reward; LoRA adapters
+Notebook / training env | Google Colab | CUDA GPU; W&B logging when key present
+Evaluation & plotting | NumPy + Matplotlib | No GPU required; standard-library otherwise
+Hosting (demo mirror) | Render free tier | render.yaml blueprint; Procfile for Gunicorn
+Package management | uv (uv.lock) | Locked for reproducibility
+Command | Output
+python -m scripts.eval_heuristic --seeds 60 | 4-policy multi-seed scores → heuristic_scores.json + CI plot
+python -m scripts.ablation_env --seeds 40 | 6-ablation study → ablation_env.json + bar chart
+python -m scripts.paired_scores | Per-seed hard-task scatter + delta histogram
+python -m scripts.verify_stochasticity --seeds 30 | State σ vs grader σ audit → stochasticity_report.json
+python -m scripts.inspect_reward --task medium --seed 7 --action pay_bill_full --arg rent | Fire all 14 reward terms for a specific step
+python -m scripts.check_openenv --base http://127.0.0.1:7860 | OpenEnv 15-check HTTP compliance smoke test
+python -m scripts.regenerate_figures | Re-plot every README figure from committed JSON
+python -m pytest tests/ | Reward-invariant unit tests
+Weight | Criterion | Evidence
+40% | Innovation | 14 additive reward terms (overdraft, on-time bill pay, APR-weighted debt service, credit-score delta, savings-growth with churn gating, liquidity buffer, 7-day action diversity; minus late pay, interest bleed, default, predatory-loan carry, consecutive do-nothing streak). UPI micro-spends and peer-pressure nudges. Informal-lender observation hides 240–365% APR behind a daily-rate label. Environment ablation shows all mechanics bind.
+30% | Story / Narrative | README (5-minute judge read), MINI_BLOG.md, and the /demo/ interactive UI
+20% | Training Evidence | training_loss_7b.png (SFT loss curve), before_after_scores_7b.png (3-policy comparison), heuristic_scores.json (n=60 seeds), ablation_env.json (6 ablations), paired_scores_hard.png (seed-matched scatter), stochasticity_report.json
+10% | Reward / Pipeline | GRPO reward_fn replays expert prefix deterministically, parses strictly, runs env.step, optimises dense return. grade_episode is separate. Invariants checked by tests/test_reward_properties.py.
+Resource | URL
+Live Demo UI | https://indra-dhanush-financial-triage-env.hf.space/demo/
+HuggingFace Space | https://huggingface.co/spaces/indra-dhanush/financial-triage-env
+OpenAPI / Swagger | https://indra-dhanush-financial-triage-env.hf.space/docs
+Health Probe | https://indra-dhanush-financial-triage-env.hf.space/health
+GitHub Mirror | https://github.com/indra-2007/financial-triage-env
+Colab Notebook (SFT + GRPO) | https://colab.research.google.com/github/indra-2007/financial-triage-env/blob/main/financial_triage_training.ipynb
+OpenEnv Framework | https://huggingface.co/openenv
+openenv-core PyPI | https://pypi.org/project/openenv-core/
