@@ -1,192 +1,155 @@
-<div align="center">
+# BiasScope
 
-# ⚖️ BiasScope — AI Bias Auditing & De-Biasing Platform
+BiasScope is a full-stack auditing tool for detecting and mitigating algorithmic bias in AI decision-making systems. It was built for the Google Developer Groups (GDG) Solution Challenge 2026 by Team NeuroSparks at RVCE.
 
-> **Google Developer Groups (GDG) Solution Challenge · Team NeuroSparks · RVCE**
-
-[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
-[![React](https://img.shields.io/badge/React_19-20232A?style=for-the-badge&logo=react&logoColor=61DAFB)](https://react.dev/)
-[![Gemini](https://img.shields.io/badge/Google_Gemini_AI-8E75C2?style=for-the-badge&logo=google&logoColor=white)](https://ai.google.dev/)
-[![AIF360](https://img.shields.io/badge/IBM_AIF360-Fairness-blue?style=for-the-badge)](https://aif360.mybluemix.net/)
-[![Vite](https://img.shields.io/badge/Vite-646CFF?style=for-the-badge&logo=vite&logoColor=white)](https://vitejs.dev/)
-
-<p align="center">
-  <b>An interactive full-stack auditing engine that diagnoses, quantifies, and mitigates algorithmic bias in AI decision-making systems across hiring, lending, and college admissions.</b>
-</p>
-
-</div>
+The system simulates automated decisions across three high-stakes domains — job hiring, loan approval, and college admissions — using Google Gemini to generate applicant profiles and make decisions. A human auditor interacts with each decision, classifying input attributes and providing feedback. That feedback is stored in a persistent reinforcement learning memory bank and injected into future prompts to steer the model toward fairer outcomes.
 
 ---
 
-## 📌 Executive Summary
+## How It Works
 
-Algorithmic bias is one of the most critical vulnerabilities in automated decision-making. When machine learning models screen job candidates, evaluate loan applications, or assess university admissions, they often perpetuate historical inequities. Even when explicit protected attributes (e.g., race, gender) are omitted, models frequently exploit **proxy attributes** (e.g., ZIP codes as proxies for race, or educational institutions as proxies for socioeconomic status).
-
-**BiasScope** provides an end-to-end framework to:
-1. **Simulate high-stakes decisions** using Google Gemini across diverse applicant profiles.
-2. **Detect latent proxy bias** using automated attribute classification.
-3. **Quantify statistical fairness** using **IBM AI Fairness 360 (AIF360)** and a comprehensive 10-term fairness scoring algorithm.
-4. **Dynamically de-bias future inferences** through a persistent **Reinforcement Learning (RL) memory feedback loop**.
+1. Gemini generates a realistic applicant profile for the selected domain (job, loan, or college).
+2. Gemini makes a decision (hire / reject, approve / decline, admit / deny) and lists the attributes it weighted.
+3. The auditor classifies each attribute as Normal, Ambiguous, Redundant, or a Protected/Proxy attribute.
+4. The auditor rewards or penalizes the decision. Proxy attributes can be explicitly flagged.
+5. Feedback is written to `backend/data/memory_bank.json`. On the next decision, this memory is retrieved and injected into the Gemini prompt as explicit constraints.
+6. After a session, IBM AIF360 computes Disparate Impact and Statistical Parity Difference across all decisions. The session is graded A–F.
 
 ---
 
-## 🏗️ System Architecture
+## Architecture
 
 ```
-                               ┌──────────────────────────────────┐
-                               │     Google Gemini Flash API      │
-                               │  (Generates applicant profiles   │
-                               │   & context-aware decisions)     │
-                               └────────────────┬─────────────────┘
-                                                │
-                                                ▼
-┌───────────────────────────────┐         HTTP / JSON         ┌─────────────────────────────────┐
-│     Interactive UI Dashboard  │ ◄─────────────────────────► │       FastAPI Backend Engine    │
-│  (React 19 + Vite + Tailwind) │                             │   (Python + AIF360 + Pydantic)  │
-│                               │                             │                                 │
-│  • Real-time Auditing Panel   │                             │  • Disparate Impact Analysis    │
-│  • Proxy-Bias Classification  │                             │  • 10-Term Fairness Scorer      │
-│  • Session Grading (A–F)      │                             │  • Persistent RL Memory Bank    │
-│  • Dark Glassmorphic Design   │                             │  • Ablation & Baseline Studies  │
-└───────────────────────────────┘                             └─────────────────────────────────┘
-```
-
----
-
-## 🌟 Core Features & Modules
-
-### 1. 🎯 Three Real-World High-Stakes Domains
-- 💼 **Recruitment & Hiring:** Audits automated resume screening algorithms for gender, pedigree, and age biases.
-- 🏦 **Credit & Loan Underwriting:** Identifies discriminatory lending criteria and socioeconomic proxy markers.
-- 🎓 **Higher Education Admissions:** Analyzes holistic admissions algorithms for systemic demographic skews.
-
-### 2. 🔍 Proxy-Bias Classification Engine
-Categorizes every input attribute into four distinct analytical classifications:
-* 🟢 **Normal:** Legitimate, performance-relevant merit criteria.
-* 🟡 **Ambiguous:** Borderline criteria that warrant contextual auditing.
-* 🔴 **Redundant:** Non-informative attributes introducing decision noise.
-* 🩷 **Protected / Proxy:** Latent indicators acting as statistical proxies for protected demographic classes.
-
-### 3. 📊 IBM AIF360 & 10-Term Fairness Scoring
-* Computes mathematically sound fairness metrics including **Disparate Impact (DI)**, **Demographic Parity**, and **Equal Opportunity Difference**.
-* Grades each session from **A to F** based on:
-  * Disparate Impact compliance (30%)
-  * Attribute selection balance (20%)
-  * Decision hygiene (15%)
-  * Demographic distribution consistency (35%)
-
-### 4. 🔄 Reinforcement Learning (RL) De-Biasing Loop
-* Human auditors can reward or penalize individual decisions and flag proxy attributes.
-* Feedback is written directly to a persistent **RL Memory Bank** (`backend/data/memory_bank.json`).
-* Learned constraints are dynamically injected into future inference contexts, guiding the LLM toward demonstrably fairer outcomes without requiring full model retraining.
-
-### 5. 🔬 Ablation Studies & Baselines
-* Compare audit sessions against **4 naive baseline policies** (Random, Merit-Only, Demographic-Blind, Majority-Favored).
-* Run ablation tests to isolate the individual contribution of each de-biasing mechanism.
-
----
-
-## 🛠️ Technology Stack
-
-| Layer | Technologies |
-| :--- | :--- |
-| **Frontend** | React 19, Vite, Lucide Icons, Modern CSS Glassmorphism |
-| **Backend Engine** | Python 3.10+, FastAPI, Uvicorn, Pydantic |
-| **Fairness & ML** | IBM AI Fairness 360 (AIF360), Scikit-Learn, Pandas, NumPy |
-| **Generative AI** | Google Gemini Flash API (`@google/generative-ai`) |
-| **Data & Persistence**| JSON-backed RL Memory Bank, Calibration Dataset |
-
----
-
-## 📂 Repository Structure
-
-```text
-GDG_AI_Solution_Challenge_NeuroSparks/
-├── biasscope/
-│   ├── backend/                     # Python FastAPI microservice
-│   │   ├── main.py                  # API routes, middleware, CORS
-│   │   ├── services/
-│   │   │   ├── aif360_service.py    # IBM AIF360 disparity computation
-│   │   │   ├── fairness_scorer.py   # 10-term fairness metric scoring
-│   │   │   ├── rl_memory.py         # Reinforcement learning memory bank
-│   │   │   ├── attribute_classifier.py # 4-tier proxy-bias classifier
-│   │   │   ├── profile_generator.py # Deterministic seeded profile generator
-│   │   │   ├── ablation.py          # Ablation test suite
-│   │   │   └── baselines.py         # Naive baseline comparison models
-│   │   ├── routers/                 # Modular API route controllers
-│   │   └── data/                    # Memory bank & calibration datasets
-│   │
-│   └── frontend/                    # Modern React 19 client application
-│       ├── src/
-│       │   ├── App.jsx              # Main auditing dashboard UI
-│       │   ├── services/
-│       │   │   ├── llm.js           # Gemini API integration
-│       │   │   ├── rl.js            # Client-side RL memory handler
-│       │   │   ├── attributeClassifier.js # Front-end proxy tagger
-│       │   │   └── api.js           # FastAPI client integration
-│       │   └── index.css            # Custom design tokens & dark styling
-│       └── package.json
+biasscope/
+├── backend/                         FastAPI (Python)
+│   ├── main.py                      Entry point, CORS, router registration
+│   ├── routers/
+│   │   ├── decision.py              POST /api/decide, POST /api/session-grade
+│   │   ├── feedback.py              POST /api/reward, /api/penalize, /api/flag-proxy
+│   │   ├── bias.py                  POST /api/analyze-bias, /api/apply-correction
+│   │   └── session.py              POST /api/session/reset, /step, /ablation
+│   ├── services/
+│   │   ├── aif360_service.py        Disparate Impact and Reweighing via IBM AIF360
+│   │   ├── fairness_scorer.py       11-term per-decision fairness scoring
+│   │   ├── rl_memory.py             JSON-persisted reward/penalty memory bank
+│   │   ├── attribute_classifier.py  4-category attribute classification
+│   │   ├── profile_generator.py     Seeded, difficulty-scaled profile generation
+│   │   ├── ablation.py              Ablation study runner
+│   │   └── baselines.py             Four naive comparison policies
+│   ├── schemas/domains.py           Pydantic request/response models
+│   └── data/
+│       ├── memory_bank.json         RL memory (persisted across sessions)
+│       └── calibration.json         Real-world bias base rates
 │
-├── implementation.md                # Full engineering specification
-├── plan.md                          # Phased development roadmap
-└── README.md                        # Project documentation
+└── frontend/                        React 19 + Vite
+    └── src/
+        ├── App.jsx                  Main dashboard — 3 tabs
+        ├── index.css                Dark glassmorphism theme
+        └── services/
+            ├── llm.js               Gemini API calls
+            ├── rl.js                Client-side RL memory (mirrors backend)
+            ├── attributeClassifier.js  Front-end proxy classification
+            └── api.js               FastAPI client
 ```
 
 ---
 
-## 🚀 Getting Started
+## Fairness Scoring
 
-### 1. Frontend Setup
+Each decision receives an **11-term decomposed fairness score**. Terms include:
+
+- Protected attribute avoidance
+- Proxy attribute penalty (e.g. Zip Code, University Name, Surname)
+- Redundant attribute penalty
+- Merit attribute coverage
+- Decision-outcome balance (approve/reject ratio)
+- Unknown attribute risk (attributes the system has not seen and cannot verify)
+
+Sessions are graded A–F based on weighted aggregates across all decisions, with Disparate Impact carrying the largest weight (30%).
+
+---
+
+## RL Memory Bank
+
+The memory bank is a JSON file keyed by domain:
+
+```json
+{
+  "job":     { "positive": ["Years of Experience"], "negative": ["Zip Code", "Surname"] },
+  "loan":    { "positive": ["Credit Score"],        "negative": ["Neighborhood"] },
+  "college": { "positive": ["GPA"],                 "negative": ["High School Name"] }
+}
+```
+
+`get_memory_context(domain)` serializes this into a string that is appended to the Gemini system prompt before each new decision. The model is explicitly told which attributes have been flagged as biased proxies and instructed to ignore them.
+
+The frontend `rl.js` maintains a client-side mirror. On session start, the frontend syncs with the backend via `POST /api/session/reset`, merging both copies by taking the union of positive and negative sets and resolving conflicts in favor of the most recent frontend signal.
+
+---
+
+## Domains and Attribute Classification
+
+### Attribute Categories
+
+| Category  | Meaning                                                                 |
+| :-------- | :---------------------------------------------------------------------- |
+| Normal    | Legitimate merit criterion for the domain                               |
+| Ambiguous | Borderline — may be legitimate or a soft proxy depending on context     |
+| Redundant | Duplicate or noise — adds no information beyond another present attribute|
+| Protected/Proxy | Directly protected class or a known statistical proxy for one    |
+
+### Domain-specific Proxy Examples
+
+| Domain  | Proxy Attribute      | Protected Class It Proxies |
+| :------ | :------------------- | :------------------------- |
+| Job     | Zip Code             | Race / Socioeconomic status |
+| Job     | University Name      | Wealth / Social class      |
+| Loan    | Neighborhood         | Race                       |
+| College | High School Name     | Socioeconomic status       |
+| College | Parent Occupation    | Class / Wealth             |
+
+---
+
+## Running the Project
+
+### Frontend
 
 ```bash
-# Navigate to the frontend directory
 cd biasscope/frontend
-
-# Install dependencies
 npm install
-
-# Launch the development server
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173) in your browser and enter your **Google Gemini API Key** when prompted.
+Opens at `http://localhost:5173`. Enter a Gemini API key when prompted. The frontend works standalone without the backend — AIF360 features and persistent RL memory will be disabled.
 
----
-
-### 2. Backend Setup (Enables IBM AIF360 Engine)
+### Backend
 
 ```bash
-# Navigate to the backend directory
 cd biasscope/backend
-
-# Create and activate a virtual environment
 python -m venv venv
-# Windows:
-.\venv\Scripts\activate
-# Linux/macOS:
-source venv/bin/activate
-
-# Install dependencies
+# Windows: .\venv\Scripts\activate
+# macOS/Linux: source venv/bin/activate
 pip install -r requirements.txt
-
-# Start the FastAPI server
 uvicorn main:app --reload --port 8000
 ```
 
-The backend documentation will be live at [http://localhost:8000/docs](http://localhost:8000/docs).
+API docs at `http://localhost:8000/docs`.
 
 ---
 
-## 👥 Team NeuroSparks
+## Tech Stack
 
-Developed for the **Google Developer Groups (GDG) AI Solution Challenge** by students of **RV College of Engineering (RVCE)**:
-
-* 👩‍💻 **Sanjana H V** — *AI/ML Integration, RL Memory Feedback Architecture & Full-Stack Development*
-* 👨‍💻 **Saish Ambar** — *System Architecture & Backend Services*
-* 👨‍💻 **Vikas Prakash Ambore** — *Fairness Scorer & Data Modeling*
+| Component        | Technology                                      |
+| :--------------- | :---------------------------------------------- |
+| Frontend         | React 19, Vite, Lucide Icons                    |
+| Backend          | Python, FastAPI, Uvicorn, Pydantic              |
+| Fairness Engine  | IBM AI Fairness 360 (AIF360), Pandas, NumPy     |
+| AI               | Google Gemini Flash (`@google/generative-ai`)   |
+| Persistence      | JSON flat files (memory bank, calibration data) |
 
 ---
 
-<div align="center">
-  <sub>Built with ❤️ by Team NeuroSparks · RV College of Engineering, Bengaluru</sub>
-</div>
+## Team
+
+Sanjana H V, Saish Ambar, Vikas Prakash Ambore — RV College of Engineering, Bengaluru.
+GDG Solution Challenge 2026.
